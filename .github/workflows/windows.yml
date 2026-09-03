@@ -1,0 +1,96 @@
+name: Windows — проверки и сборка
+
+on:
+  push:
+    branches: [main, dev]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Получить исходники
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Установить Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: Кэш зависимостей Rust
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: windows-x64
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Проверить форматирование
+        run: cargo fmt --check
+      - name: Запустить тесты
+        run: cargo test --locked
+      - name: Проверить качество кода
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Собрать EXE
+        run: cargo build --locked --release
+      - name: Подготовить файлы выпуска
+        run: ./scripts/package-release.ps1
+      - name: Сохранить EXE и контрольную сумму
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dxf-canvas-windows-x64
+          path: |
+            dist/release/*.exe
+            dist/release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Черновик релиза
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Получить описание выпуска
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Получить проверенную сборку
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: dxf-canvas-windows-x64
+          path: dist/release
+      - name: Создать черновик с EXE
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:RELEASE_TAG
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw 'Ожидается тег vX.Y.Z' }
+          $assets = @(Get-ChildItem -LiteralPath dist/release -File | ForEach-Object FullName)
+          $notes = "docs/releases/$tag.md"
+          if (Test-Path -LiteralPath $notes) {
+            gh release create $tag @assets --verify-tag --draft --title "DXF Холст $tag" --notes-file $notes
+          } else {
+            gh release create $tag @assets --verify-tag --draft --title "DXF Холст $tag" --generate-notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Не удалось создать черновик релиза' }

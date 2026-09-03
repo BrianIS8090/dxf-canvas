@@ -1,0 +1,12 @@
+/target/
+/dist/
+/private/
+/tests/fixtures/problem_areas.dxf
+.env
+.env.*
+*.pem
+*.key
+*.pdb
+*.log
+.DS_Store
+Thumbs.db

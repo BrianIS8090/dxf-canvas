@@ -1,0 +1,29 @@
+name: Ошибка в программе
+description: Проблема с отображением, измерениями или диагностикой DXF
+title: '[Ошибка] '
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Версия DXF Холста
+      description: Номер в шапке программы
+      placeholder: '0.5.3'
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Версия Windows
+      placeholder: Windows 11 x64
+  - type: textarea
+    id: steps
+    attributes:
+      label: Как повторить
+      description: Перечислите действия, ожидаемый и фактический результат
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Скриншоты и минимальный пример
+      description: Не прикладывайте рабочие чертежи, личные данные и конфиденциальные файлы. DXF можно приложить в ZIP.

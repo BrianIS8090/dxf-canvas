@@ -1,0 +1,18 @@
+name: Предложение
+description: Улучшение существующего сценария или новая возможность
+title: '[Идея] '
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какую задачу нужно решить
+      description: Опишите текущий сценарий и затруднение
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Предлагаемое поведение
+      description: Что должно происходить в программе
+    validations:
+      required: true

@@ -1,0 +1,17 @@
+[package]
+name = "dxf-canvas"
+version = "0.5.3"
+edition = "2024"
+description = "Настольное приложение для раскладки и просмотра нескольких DXF на одном холсте"
+license = "MIT"
+
+[dependencies]
+dxf = "0.6.1"
+eframe = "0.36.1"
+rfd = "0.15"
+thiserror = "2"
+
+[profile.release]
+lto = "thin"
+opt-level = 3
+strip = true
