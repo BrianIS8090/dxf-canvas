@@ -569,7 +569,7 @@ fn separate_contours(
 ) -> Vec<Vec<usize>> {
   let mut parents: Vec<_> = (0..endpoint_curves.len()).collect();
   let mut first_edge = HashMap::new();
-  for (edge, ends) in groups.chunks_exact(2).enumerate() {
+  for (edge, ends) in groups.as_chunks::<2>().0.iter().enumerate() {
     for node in ends {
       if let Some(other) = first_edge.insert(*node, edge) {
         let a = root(&mut parents, edge);
