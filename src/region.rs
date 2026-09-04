@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::{
   geometry::{Bounds, DrawingItem, Point},
-  planar::{Edge, EdgeShape, contacts, distance, drawing_edges},
+  planar::{ContactKind, Contacts, Edge, EdgeShape, contacts, distance, drawing_edges},
   spatial::SpatialIndex,
 };
 
@@ -13,6 +13,9 @@ pub struct RegionMeasurement {
   pub holes: usize,
   pub approximate: bool,
   pub boundaries: Vec<Vec<Point>>,
+  pub slit_count: usize,
+  pub slit_length: f64,
+  pub slits: Vec<Vec<Point>>,
 }
 
 struct Boundary {
@@ -37,7 +40,8 @@ pub fn measure_region(item: &DrawingItem, point: Point) -> Result<RegionMeasurem
       "Слишком много участков для расчёта площади. Оставьте видимыми только нужные слои.".into(),
     );
   }
-  let boundaries = boundaries(&edges.values, tolerance)?;
+  let graph = EndpointGraph::new(&edges.values, tolerance);
+  let boundaries = boundaries(&edges.values, &graph)?;
   let root = boundaries.iter().enumerate()
     .filter(|(_, b)| contains_bounds(b.bounds, point) && inside(&b.points, point))
     .max_by(|(_, a), (_, b)| a.area.total_cmp(&b.area))
@@ -58,18 +62,6 @@ pub fn measure_region(item: &DrawingItem, point: Point) -> Result<RegionMeasurem
       owner[*edge] = true;
     }
   }
-  // Не выдаём площадь, если незамкнутое отверстие или ветка остались внутри детали.
-  for (i, edge) in edges.values.iter().enumerate() {
-    if !owner[i] {
-      let (a, b) = edge.shape.ends();
-      if inside(&outer.points, a) || inside(&outer.points, b) {
-        return Err(
-          "Внутри детали есть незамкнутый или разветвлённый контур. Сначала проверьте геометрию."
-            .into(),
-        );
-      }
-    }
-  }
   let intersections = contacts(&edges.values, 0.001 / item.units.factor());
   if intersections.limited {
     return Err(
@@ -79,7 +71,7 @@ pub fn measure_region(item: &DrawingItem, point: Point) -> Result<RegionMeasurem
   if intersections
     .values
     .iter()
-    .any(|c| owner[c.a] || owner[c.b])
+    .any(|c| owner[c.a] && owner[c.b])
   {
     return Err("Контуры детали пересекаются, касаются или накладываются. Однозначную площадь определить нельзя.".into());
   }
@@ -93,9 +85,12 @@ pub fn measure_region(item: &DrawingItem, point: Point) -> Result<RegionMeasurem
     holes: 0,
     approximate: false,
     boundaries: Vec::new(),
+    slit_count: 0,
+    slit_length: 0.0,
+    slits: Vec::new(),
   };
   let mut comparisons = 0;
-  for i in selected {
+  for &i in &selected {
     let b = &boundaries[i];
     let p = b.points[0];
     let mut depth = 0;
@@ -114,50 +109,104 @@ pub fn measure_region(item: &DrawingItem, point: Point) -> Result<RegionMeasurem
     result.approximate |= b.approximate;
     result.boundaries.push(b.points.clone());
   }
+  add_slits(
+    &edges.values,
+    &graph,
+    &intersections,
+    &selected.iter().map(|i| &boundaries[*i]).collect::<Vec<_>>(),
+    &owner,
+    tolerance,
+    &mut result,
+  )?;
   if result.area <= 0.0 || !result.area.is_finite() || !result.perimeter.is_finite() {
     return Err("Некорректная площадь или длина контура.".into());
   }
   Ok(result)
 }
 
-fn boundaries(edges: &[Edge], tolerance: f64) -> Result<Vec<Boundary>, String> {
-  let mut positions: Vec<Point> = Vec::new();
-  let mut buckets: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
-  let mut nodes = Vec::new();
-  for edge in edges {
-    let (a, b) = edge.shape.ends();
-    let mut pair = [0; 2];
-    for (side, p) in [a, b].into_iter().enumerate() {
-      let key = (
-        (p.x / tolerance).floor().clamp(-9e18, 9e18) as i64,
-        (p.y / tolerance).floor().clamp(-9e18, 9e18) as i64,
-      );
-      let found = (-1..=1)
-        .flat_map(|x| (-1..=1).map(move |y| (key.0 + x, key.1 + y)))
-        .filter_map(|k| buckets.get(&k))
-        .flatten()
-        .find(|i| distance(positions[**i], p) <= tolerance)
-        .copied();
-      pair[side] = found.unwrap_or_else(|| {
-        let i = positions.len();
-        positions.push(p);
-        buckets.entry(key).or_default().push(i);
-        i
-      });
+struct EndpointGraph {
+  positions: Vec<Point>,
+  nodes: Vec<[usize; 2]>,
+  adjacent: Vec<Vec<usize>>,
+}
+
+impl EndpointGraph {
+  fn new(edges: &[Edge], tolerance: f64) -> Self {
+    let mut positions: Vec<Point> = Vec::new();
+    let mut buckets: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+    let mut nodes = Vec::new();
+    for edge in edges {
+      let (a, b) = edge.shape.ends();
+      let mut pair = [0; 2];
+      for (side, p) in [a, b].into_iter().enumerate() {
+        let key = (
+          (p.x / tolerance).floor().clamp(-9e18, 9e18) as i64,
+          (p.y / tolerance).floor().clamp(-9e18, 9e18) as i64,
+        );
+        let found = (-1..=1)
+          .flat_map(|x| (-1..=1).map(move |y| (key.0 + x, key.1 + y)))
+          .filter_map(|k| buckets.get(&k))
+          .flatten()
+          .find(|i| distance(positions[**i], p) <= tolerance)
+          .copied();
+        pair[side] = found.unwrap_or_else(|| {
+          let i = positions.len();
+          positions.push(p);
+          buckets.entry(key).or_default().push(i);
+          i
+        });
+      }
+      nodes.push(pair);
     }
-    nodes.push(pair);
-  }
-  let mut adjacent = vec![Vec::new(); positions.len()];
-  for (edge, pair) in nodes.iter().enumerate() {
-    for node in pair {
-      adjacent[*node].push(edge);
+    let mut adjacent = vec![Vec::new(); positions.len()];
+    for (edge, pair) in nodes.iter().enumerate() {
+      for node in pair {
+        adjacent[*node].push(edge);
+      }
+    }
+    Self {
+      positions,
+      nodes,
+      adjacent,
     }
   }
+
+  fn closed_core(&self) -> Vec<bool> {
+    // Отделяем тупиковые прорези от границ; исходные участки сохраняются для длины реза.
+    let mut active = vec![true; self.nodes.len()];
+    let mut degree: Vec<_> = self.adjacent.iter().map(Vec::len).collect();
+    let mut queue: VecDeque<_> = (0..degree.len()).filter(|i| degree[*i] < 2).collect();
+    while let Some(node) = queue.pop_front() {
+      for &edge in &self.adjacent[node] {
+        if !active[edge] {
+          continue;
+        }
+        active[edge] = false;
+        for endpoint in self.nodes[edge] {
+          degree[endpoint] -= 1;
+          if degree[endpoint] == 1 {
+            queue.push_back(endpoint);
+          }
+        }
+      }
+    }
+    active
+  }
+}
+
+fn boundaries(edges: &[Edge], graph: &EndpointGraph) -> Result<Vec<Boundary>, String> {
+  let nodes = &graph.nodes;
+  let active = graph.closed_core();
+  let adjacent: Vec<Vec<usize>> = graph
+    .adjacent
+    .iter()
+    .map(|neighbors| neighbors.iter().copied().filter(|i| active[*i]).collect())
+    .collect();
   let mut visited = vec![false; edges.len()];
   let mut result = Vec::new();
   let mut total_points = 0;
   for first in 0..edges.len() {
-    if visited[first] {
+    if visited[first] || !active[first] {
       continue;
     }
     let start = nodes[first][0];
@@ -227,6 +276,167 @@ fn boundaries(edges: &[Edge], tolerance: f64) -> Result<Vec<Boundary>, String> {
     }
   }
   Ok(result)
+}
+
+fn add_slits(
+  edges: &[Edge],
+  graph: &EndpointGraph,
+  contacts: &Contacts,
+  contours: &[&Boundary],
+  owner: &[bool],
+  tolerance: f64,
+  result: &mut RegionMeasurement,
+) -> Result<(), String> {
+  let error = "Внутри детали есть незамкнутый или неоднозначный контур. Прорезь должна одним концом примыкать к границе, а другим заканчиваться в материале, без пересечений и разветвлений.";
+  let outer = contours
+    .iter()
+    .max_by(|a, b| a.area.total_cmp(&b.area))
+    .unwrap();
+  let mut edge_contacts = vec![Vec::new(); edges.len()];
+  for (index, contact) in contacts.values.iter().enumerate() {
+    edge_contacts[contact.a].push(index);
+    edge_contacts[contact.b].push(index);
+  }
+  let mut visited = owner.to_vec();
+  let mut visited_nodes = vec![false; graph.positions.len()];
+  let open_degree: Vec<_> = graph
+    .adjacent
+    .iter()
+    .map(|neighbors| neighbors.iter().filter(|i| !owner[**i]).count())
+    .collect();
+  let contour_index = SpatialIndex::new(
+    contours.len(),
+    contours.iter().enumerate().map(|(i, b)| (i, b.bounds)),
+  );
+  let mut sample_count = 0;
+  let mut comparisons = 0;
+  for first in 0..edges.len() {
+    if visited[first] {
+      continue;
+    }
+    let mut component = Vec::new();
+    let mut stack = vec![first];
+    visited[first] = true;
+    while let Some(edge) = stack.pop() {
+      component.push(edge);
+      for node in graph.nodes[edge] {
+        if visited_nodes[node] {
+          continue;
+        }
+        visited_nodes[node] = true;
+        for &neighbor in &graph.adjacent[node] {
+          if !visited[neighbor] {
+            visited[neighbor] = true;
+            stack.push(neighbor);
+          }
+        }
+      }
+    }
+    let relevant = component.iter().any(|i| {
+      let (a, b) = edges[*i].shape.ends();
+      (contains_bounds(outer.bounds, a) && inside(&outer.points, a))
+        || (contains_bounds(outer.bounds, b) && inside(&outer.points, b))
+        || graph.nodes[*i]
+          .iter()
+          .any(|n| graph.adjacent[*n].iter().any(|e| owner[*e]))
+        || edge_contacts[*i].iter().any(|c| {
+          let c = &contacts.values[*c];
+          owner[c.a] || owner[c.b]
+        })
+    });
+    if !relevant {
+      continue;
+    }
+    let mut nodes: Vec<_> = component.iter().flat_map(|i| graph.nodes[*i]).collect();
+    nodes.sort_unstable();
+    nodes.dedup();
+    let mut ends = Vec::new();
+    for &node in &nodes {
+      let degree = open_degree[node];
+      if degree == 1 {
+        ends.push(node);
+      }
+      if degree > 2 {
+        return Err(error.into());
+      }
+    }
+    if ends.len() != 2 {
+      return Err(error.into());
+    }
+    let mut attachments = Vec::new();
+    for &node in &nodes {
+      if graph.adjacent[node].iter().any(|i| owner[*i]) {
+        if !ends.contains(&node) {
+          return Err(error.into());
+        }
+        attachments.push(node);
+      }
+    }
+    for &edge in &component {
+      for &index in &edge_contacts[edge] {
+        let contact = &contacts.values[index];
+        let other = if contact.a == edge {
+          contact.b
+        } else {
+          contact.a
+        };
+        let ContactKind::Crossing(point) = contact.kind else {
+          return Err(error.into());
+        };
+        if !owner[other] {
+          return Err(error.into());
+        }
+        let Some(&node) = ends
+          .iter()
+          .find(|n| distance(graph.positions[**n], point) <= tolerance)
+        else {
+          return Err(error.into());
+        };
+        attachments.push(node);
+      }
+    }
+    attachments.sort_unstable();
+    attachments.dedup();
+    if attachments.len() != 1 {
+      return Err(error.into());
+    }
+    for edge in component {
+      let shape = edges[edge].shape;
+      let points = shape.points();
+      sample_count += points.len();
+      if sample_count > 2_000_000 {
+        return Err("Слишком много точек прорезей. Оставьте видимой только нужную деталь.".into());
+      }
+      // Прорезь лежит в материале, а не в отверстии или снаружи. Ширина реза в DXF не задана.
+      for pair in points.windows(2) {
+        let midpoint = Point::new((pair[0].x + pair[1].x) * 0.5, (pair[0].y + pair[1].y) * 0.5);
+        let mut depth = 0;
+        for index in contour_index.query(Bounds {
+          min: midpoint,
+          max: midpoint,
+        }) {
+          comparisons += contours[index].points.len();
+          if comparisons > 20_000_000 {
+            return Err("Проверка расположения прорезей достигла защитного лимита. Оставьте только нужную деталь.".into());
+          }
+          depth += usize::from(inside(&contours[index].points, midpoint));
+        }
+        if depth % 2 == 0 {
+          return Err(error.into());
+        }
+      }
+      result.slit_length += shape.length();
+      result.perimeter += shape.length();
+      result.approximate |= edges[edge].approximate;
+      let (a, b) = shape.ends();
+      for (side, p) in [a, b].into_iter().enumerate() {
+        result.approximate |= distance(p, graph.positions[graph.nodes[edge][side]]) > 1e-9;
+      }
+      result.slits.push(points);
+    }
+    result.slit_count += 1;
+  }
+  Ok(())
 }
 
 fn contains_bounds(b: Bounds, p: Point) -> bool {

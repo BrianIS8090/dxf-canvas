@@ -854,7 +854,7 @@ dependencies = [
 
 [[package]]
 name = "dxf-canvas"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "dxf",
  "earcutr",

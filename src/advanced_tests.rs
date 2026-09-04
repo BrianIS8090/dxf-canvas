@@ -56,6 +56,179 @@ fn near(actual: f64, expected: f64) {
 }
 
 #[test]
+fn boundary_relief_slit_adds_one_cut_pass_without_changing_area() {
+  let mut d = drawing();
+  rectangle(&mut d, 0.0, 0.0, 100.0, 50.0);
+  line(&mut d, (100.0, 25.0), (99.0, 25.0));
+  let item = imported(d);
+  let result = measure_region(&item, Point::new(5.0, 5.0)).unwrap();
+  near(result.area, 5000.0);
+  near(result.perimeter, 301.0);
+  near(result.slit_length, 1.0);
+  assert_eq!(result.slit_count, 1);
+  assert!(!result.approximate);
+}
+
+#[test]
+fn connected_relief_segments_at_a_corner_are_counted_once() {
+  let mut d = drawing();
+  rectangle(&mut d, 0.0, 0.0, 100.0, 50.0);
+  line(&mut d, (6.0, 4.0), (3.0, 4.0));
+  line(&mut d, (0.0, 0.0), (3.0, 4.0));
+  let result = measure_region(&imported(d), Point::new(10.0, 10.0)).unwrap();
+  near(result.area, 5000.0);
+  near(result.perimeter, 308.0);
+  near(result.slit_length, 8.0);
+  assert_eq!(result.slit_count, 1);
+  assert_eq!(result.slits.len(), 2);
+}
+
+#[test]
+fn relief_slits_may_start_on_a_hole_or_follow_an_arc() {
+  let mut d = drawing();
+  rectangle(&mut d, 0.0, 0.0, 100.0, 50.0);
+  circle(&mut d, 25.0, 25.0, 10.0);
+  line(&mut d, (25.0, 36.0), (25.0, 35.0));
+  d.add_entity(Entity::new(EntityType::Arc(Arc {
+    center: dxf::Point::new(98.0, 20.0, 0.0),
+    radius: 2.0,
+    start_angle: 0.0,
+    end_angle: 90.0,
+    ..Default::default()
+  })));
+  let result = measure_region(&imported(d), Point::new(5.0, 5.0)).unwrap();
+  near(result.area, 5000.0 - 100.0 * std::f64::consts::PI);
+  near(result.perimeter, 301.0 + 21.0 * std::f64::consts::PI);
+  near(result.slit_length, 1.0 + std::f64::consts::PI);
+  assert_eq!(result.slit_count, 2);
+  assert_eq!(result.holes, 1);
+  assert!(!result.approximate);
+}
+
+#[test]
+fn relief_slits_do_not_hide_crossings_branches_or_overlaps() {
+  let cases = [
+    vec![((100.0, 25.0), (101.0, 25.0))],
+    vec![((100.0, 25.0), (0.0, 25.0))],
+    vec![((100.0, 25.0), (90.0, 25.0)), ((95.0, 50.0), (95.0, 20.0))],
+    vec![((100.0, 25.0), (90.0, 25.0)), ((90.0, 25.0), (100.0, 25.0))],
+    vec![((100.0, 25.0), (90.0, 25.0)), ((100.0, 25.0), (95.0, 25.0))],
+    vec![
+      ((0.0, 0.0), (3.0, 4.0)),
+      ((3.0, 4.0), (6.0, 4.0)),
+      ((3.0, 4.0), (3.0, 8.0)),
+    ],
+  ];
+  for segments in cases {
+    let mut d = drawing();
+    rectangle(&mut d, 0.0, 0.0, 100.0, 50.0);
+    for &(a, b) in &segments {
+      line(&mut d, a, b);
+    }
+    assert!(
+      measure_region(&imported(d), Point::new(5.0, 10.0)).is_err(),
+      "Неоднозначная прорезь: {segments:?}"
+    );
+  }
+}
+
+#[test]
+fn relief_slits_cannot_pass_through_holes_or_end_inside_them() {
+  for end in [(25.0, 25.0), (10.0, 25.0)] {
+    let mut d = drawing();
+    rectangle(&mut d, 0.0, 0.0, 100.0, 50.0);
+    circle(&mut d, 25.0, 25.0, 10.0);
+    line(&mut d, (100.0, 25.0), end);
+    assert!(measure_region(&imported(d), Point::new(5.0, 5.0)).is_err());
+  }
+}
+
+#[test]
+fn hidden_relief_slits_are_excluded_and_other_parts_are_independent() {
+  let mut d = drawing();
+  rectangle(&mut d, 0.0, 0.0, 100.0, 50.0);
+  line(&mut d, (100.0, 25.0), (99.0, 25.0));
+  rectangle(&mut d, 200.0, 0.0, 100.0, 50.0);
+  line(&mut d, (300.0, 25.0), (299.0, 25.0));
+  let mut item = imported(d);
+  let result = measure_region(&item, Point::new(5.0, 5.0)).unwrap();
+  near(result.perimeter, 301.0);
+  assert_eq!(result.slit_count, 1);
+  item.appearance.styles[4].visible = false;
+  let result = measure_region(&item, Point::new(5.0, 5.0)).unwrap();
+  near(result.perimeter, 300.0);
+  assert_eq!(result.slit_count, 0);
+}
+
+#[test]
+fn relief_slit_preview_and_placed_label_use_source_units_not_visual_scale() {
+  let mut d = drawing();
+  d.header.default_drawing_units = Units::Inches;
+  rectangle(&mut d, 0.0, 0.0, 2.0, 1.0);
+  line(&mut d, (2.0, 0.5), (1.5, 0.5));
+  let mut item = imported(d);
+  item.scale = 3.0;
+  item.offset = Point::new(10.0, 20.0);
+  let view = ViewTransform {
+    scale: 100.0,
+    origin: eframe::egui::pos2(0.0, 500.0),
+  };
+  let screen = |p| view.world_to_screen(item.world_point(p));
+  let mut state = MeasurementState::default();
+  state.set_tool(Tool::Region);
+  state.click(
+    std::slice::from_ref(&item),
+    view,
+    screen(Point::new(0.5, 0.5)),
+  );
+  assert!(state.notice.is_none());
+  let label = screen(Point::new(3.0, 2.0));
+  let preview = state
+    .preview(std::slice::from_ref(&item), view, label)
+    .unwrap();
+  let text = preview.text(&item);
+  assert!(text.contains("1290,32 мм²"), "{text}");
+  assert!(text.contains("165,1 мм"), "{text}");
+  assert!(
+    text.contains("Прорези: 1 · 12,7 мм (включены в P)"),
+    "{text}"
+  );
+  let DimensionKind::Region(region) = &preview.kind else {
+    panic!("Нет площади")
+  };
+  assert_eq!(region.slits.len(), 1);
+  state.click(std::slice::from_ref(&item), view, label);
+  assert_eq!(state.completed.len(), 1);
+  assert_eq!(state.completed[0].text(&item), text);
+  state.undo();
+  assert!(state.completed.is_empty());
+}
+
+#[test]
+#[ignore = "Нужен локальный DXF_AREA_FIXTURE; производственный чертёж не публикуется"]
+fn supplied_bracket_has_area_and_perimeter() {
+  let path = std::env::var_os("DXF_AREA_FIXTURE").expect("Не задан DXF_AREA_FIXTURE");
+  let before = std::fs::read(&path).unwrap();
+  let item = crate::dxf_import::load_dxf(std::path::Path::new(&path)).unwrap();
+  let point = Point::new(
+    (item.bounds.min.x + item.bounds.max.x) * 0.5,
+    (item.bounds.min.y + item.bounds.max.y) * 0.5,
+  );
+  let result = measure_region(&item, point).unwrap();
+  near(result.area, 1750.050748721657);
+  near(result.perimeter, 289.83275653839775);
+  near(result.slit_length, 2.0);
+  assert_eq!(result.slit_count, 2);
+  assert_eq!(result.holes, 5);
+  assert!(!result.approximate);
+  assert_eq!(std::fs::read(&path).unwrap(), before);
+  println!(
+    "S = {:.9}; P = {:.9}; отверстий: {}; прорезей: {}; длина прорезей: {:.9}",
+    result.area, result.perimeter, result.holes, result.slit_count, result.slit_length
+  );
+}
+
+#[test]
 fn area_of_separate_lines_subtracts_holes_and_includes_their_perimeters() {
   let mut d = drawing();
   rectangle(&mut d, 0.0, 0.0, 100.0, 50.0);

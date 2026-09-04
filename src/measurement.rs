@@ -315,7 +315,7 @@ impl Dimension {
   pub fn text(&self, item: &DrawingItem) -> String {
     if let DimensionKind::Region(region) = &self.kind {
       let f = item.units.factor();
-      return format!(
+      let mut text = format!(
         "{}S = {} {}²\nP = {} {} · отверстий: {}",
         if self.approximate { "≈ " } else { "" },
         number(region.area * f * f),
@@ -324,6 +324,15 @@ impl Dimension {
         item.units.label(),
         region.holes
       );
+      if region.slit_count > 0 {
+        text.push_str(&format!(
+          "\nПрорези: {} · {} {} (включены в P)",
+          region.slit_count,
+          number(region.slit_length * f),
+          item.units.label()
+        ));
+      }
+      return text;
     }
     if matches!(self.kind, DimensionKind::Angle { .. }) {
       return format!(
@@ -580,7 +589,7 @@ impl MeasurementState {
         "Угол: первая точка → вершина → третья точка → размещение · Меньший угол 0–180°"
       }
       (_, Tool::Region) => {
-        "Щёлкните внутри детали · S — площадь без отверстий · P — длина всех границ, включая отверстия · Только видимые слои"
+        "Щёлкните внутри детали · S — площадь без отверстий · P — все границы и прорези (один проход) · Только видимые слои"
       }
       (_, Tool::Select) => {
         "ЛКМ — двигать деталь · Маркеры / Ctrl+колесо — размер детали · Колесо — масштаб холста"

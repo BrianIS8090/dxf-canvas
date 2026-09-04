@@ -110,7 +110,7 @@ pub fn paint_dimension(
     }
     DimensionKind::Region(ref region) => {
       if preview {
-        for boundary in &region.boundaries {
+        for boundary in region.boundaries.iter().chain(&region.slits) {
           painter.add(egui::Shape::line(
             boundary.iter().copied().map(&screen).collect(),
             Stroke::new(2.5, color),
