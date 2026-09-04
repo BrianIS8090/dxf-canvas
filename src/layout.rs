@@ -153,6 +153,7 @@ mod tests {
 
   fn item(name: &str, width: f64, height: f64) -> DrawingItem {
     DrawingItem {
+      appearance: Default::default(),
       units: Default::default(),
       path: PathBuf::from(name),
       name: name.to_owned(),

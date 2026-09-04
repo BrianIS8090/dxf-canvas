@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeFrameworkVersion>10.0.10</RuntimeFrameworkVersion>
+    <AssemblyName>DxfCanvas.DwgConverter</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <OptimizationPreference>Size</OptimizationPreference>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="ACadSharp" Version="3.7.1" />
+    <!-- Метаданные CAD-классов используются библиотекой через отражение. -->
+    <TrimmerRootAssembly Include="ACadSharp" />
+  </ItemGroup>
+</Project>

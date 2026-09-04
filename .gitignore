@@ -1,6 +1,8 @@
 /target/
 /dist/
 /private/
+/tools/dwg-converter/bin/
+/tools/dwg-converter/obj/
 /tests/fixtures/problem_areas.dxf
 .env
 .env.*

@@ -82,6 +82,43 @@ pub fn paint_dimension(
       }
       label
     }
+    DimensionKind::Angle {
+      first,
+      vertex,
+      last,
+    } => {
+      let center = screen(vertex);
+      let radius = center.distance(screen(dimension.label)).max(24.0);
+      let start = (first.y - vertex.y).atan2(first.x - vertex.x);
+      let sweep = crate::measurement::angle_radians(first, vertex, last);
+      let points: Vec<_> = (0..=64)
+        .map(|i| {
+          let angle = start + sweep * i as f64 / 64.0;
+          center + Vec2::new(angle.cos() as f32, -angle.sin() as f32) * radius
+        })
+        .collect();
+      for (source, endpoint) in [(screen(first), points[0]), (screen(last), points[64])] {
+        painter.line_segment([center, source], stroke);
+        painter.line_segment([source, endpoint], stroke);
+      }
+      arrow(painter, points[0], unit(points[1] - points[0]), color);
+      arrow(painter, points[64], unit(points[63] - points[64]), color);
+      let middle = points[32];
+      painter.add(egui::Shape::line(points, stroke));
+      center_mark(painter, center, color);
+      middle + unit(middle - center) * (font_size + 8.0)
+    }
+    DimensionKind::Region(ref region) => {
+      if preview {
+        for boundary in &region.boundaries {
+          painter.add(egui::Shape::line(
+            boundary.iter().copied().map(&screen).collect(),
+            Stroke::new(2.5, color),
+          ));
+        }
+      }
+      screen(dimension.label)
+    }
   };
   paint_label(
     painter,
@@ -187,6 +224,7 @@ mod tests {
   #[test]
   fn rendered_dimension_keeps_source_value_when_detail_is_enlarged() {
     let item = DrawingItem {
+      appearance: Default::default(),
       path: "detail.dxf".into(),
       name: "detail".into(),
       primitives: vec![],

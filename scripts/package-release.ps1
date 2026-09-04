@@ -1,3 +1,5 @@
+param([string]$OutputDirectory = 'dist/release')
+
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Push-Location -LiteralPath $projectRoot
@@ -12,11 +14,14 @@ try {
   }
   $source = Join-Path $projectRoot 'target/release/dxf-canvas.exe'
   if (-not (Test-Path -LiteralPath $source)) { throw 'Сначала выполните cargo build --locked --release' }
-  $destination = Join-Path $projectRoot 'dist/release'
+  $destination = Join-Path $projectRoot $OutputDirectory
   New-Item -ItemType Directory -Path $destination -Force | Out-Null
   $name = "DXF-Canvas-$version-windows-x64.exe"
   $asset = Join-Path $destination $name
   Copy-Item -LiteralPath $source -Destination $asset -Force
+  $licenseFiles = @('LICENSE', 'THIRD_PARTY_NOTICES.md', 'docs/licenses/ACADSHARP-LICENSE.txt', 'docs/licenses/DOTNET-LICENSE.txt', 'docs/licenses/DOTNET-NATIVE-NOTICES.txt')
+  $notices = ($licenseFiles | ForEach-Object { Get-Content -LiteralPath $_ -Raw }) -join "`n`n"
+  [System.IO.File]::WriteAllText((Join-Path $destination 'THIRD-PARTY-LICENSES.txt'), $notices, [System.Text.UTF8Encoding]::new($false))
   $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
   [System.IO.File]::WriteAllText((Join-Path $destination 'SHA256SUMS.txt'), "$hash  $name`n", [System.Text.UTF8Encoding]::new($false))
   Write-Output "Подготовлен $name; SHA-256: $hash"

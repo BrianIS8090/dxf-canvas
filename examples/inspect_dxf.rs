@@ -1,12 +1,19 @@
+#![allow(dead_code)]
 #[allow(dead_code)]
 #[path = "../src/diagnostics.rs"]
 mod diagnostics;
+#[path = "../src/display_geometry.rs"]
+mod display_geometry;
 #[allow(dead_code)]
 #[path = "../src/dxf_import.rs"]
 mod dxf_import;
 #[allow(dead_code)]
 #[path = "../src/geometry.rs"]
 mod geometry;
+#[path = "../src/planar.rs"]
+mod planar;
+#[path = "../src/spatial.rs"]
+mod spatial;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   for path in std::env::args_os().skip(1) {
@@ -74,3 +81,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   }
   Ok(())
 }
+#[path = "../src/cad_scene.rs"]
+mod cad_scene;
+#[path = "../src/cad_text.rs"]
+mod cad_text;
+#[path = "../src/dxf_scene.rs"]
+mod dxf_scene;
+#[path = "../src/hatch.rs"]
+mod hatch;
+#[path = "../src/raw_dxf.rs"]
+mod raw_dxf;

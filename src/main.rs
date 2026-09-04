@@ -1,16 +1,31 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(test)]
+mod advanced_tests;
 mod app;
 mod app_icon;
+mod cad_render;
+mod cad_scene;
+mod cad_text;
 mod diagnostics;
 #[cfg(test)]
 mod diagnostics_tests;
 mod diagnostics_ui;
+mod display_geometry;
+mod dwg_import;
 mod dxf_import;
+mod dxf_scene;
 mod geometry;
+mod hatch;
 mod layout;
+mod line_batch;
+mod loading;
 mod measurement;
 mod measurement_ui;
+mod planar;
+mod raw_dxf;
+mod region;
+mod spatial;
 #[cfg(test)]
 mod test_fixtures;
 

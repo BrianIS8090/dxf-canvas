@@ -1,7 +1,7 @@
 use eframe::egui::{self, Color32, Painter, Rect, RichText, Stroke, StrokeKind, Vec2};
 
 use crate::{
-  diagnostics::{DiagnosticReport, Finding, IssueKind, Marker},
+  diagnostics::{DiagnosticReport, DiagnosticsState, Finding, IssueKind, Marker},
   geometry::{DrawingItem, MeasureCurve, Point, Primitive, ViewTransform},
 };
 
@@ -14,11 +14,43 @@ fn color(kind: IssueKind) -> Color32 {
     IssueKind::Oval => Color32::from_rgb(112, 66, 188),
     IssueKind::UnknownUnits => Color32::from_rgb(159, 115, 6),
     IssueKind::IncompleteGeometry => Color32::from_rgb(55, 109, 145),
+    IssueKind::Intersection => Color32::from_rgb(215, 48, 20),
+    IssueKind::PartialOverlap => Color32::from_rgb(174, 42, 170),
   }
 }
 
-pub fn show_legend(ui: &mut egui::Ui, reports: &[DiagnosticReport]) {
+pub fn show_legend(ui: &mut egui::Ui, state: &mut DiagnosticsState) {
   ui.heading("Проверка DXF");
+  let mut filter = state.filter;
+  egui::ComboBox::from_id_salt("diagnostics_category")
+    .selected_text(filter.map_or("Все категории", IssueKind::label))
+    .width(ui.available_width().min(260.0))
+    .show_ui(ui, |ui| {
+      ui.selectable_value(&mut filter, None, "Все категории");
+      for kind in IssueKind::ALL {
+        ui.selectable_value(&mut filter, Some(kind), kind.label());
+      }
+    });
+  if filter != state.filter {
+    state.set_filter(filter);
+  }
+  let (position, count) = state.navigation_position();
+  ui.horizontal(|ui| {
+    if ui
+      .add_enabled(count > 0, egui::Button::new("← Назад"))
+      .clicked()
+    {
+      state.navigate(false);
+    }
+    if ui
+      .add_enabled(count > 0, egui::Button::new("Далее →"))
+      .clicked()
+    {
+      state.navigate(true);
+    }
+    ui.label(format!("{position} / {count}"));
+  });
+  let reports = &state.reports;
   let total: usize = reports.iter().map(|report| report.findings.len()).sum();
   if total == 0 {
     ui.colored_label(
@@ -49,6 +81,7 @@ pub fn show_file_report(
   report: &DiagnosticReport,
   index: usize,
   selected: Option<usize>,
+  filter: Option<IssueKind>,
 ) -> Option<usize> {
   if report.findings.is_empty() {
     ui.label(
@@ -59,30 +92,60 @@ pub fn show_file_report(
     return None;
   }
   let mut clicked = None;
-  egui::CollapsingHeader::new(format!("Замечания: {}", report.findings.len()))
-    .id_salt(("dxf_check", index))
-    .show(ui, |ui| {
-      ui.label(RichText::new("Нажмите на замечание — показать на холсте").small());
-      let limit_id = ui.make_persistent_id(("diagnostics_visible_count", index));
-      let shown = ui
-        .data_mut(|data| *data.get_temp_mut_or(limit_id, 50_usize))
-        .min(report.findings.len());
-      for (finding_index, finding) in report.findings.iter().enumerate().take(shown) {
-        if finding_button(ui, finding, finding_index, selected == Some(finding_index)).clicked() {
-          clicked = Some(finding_index);
-        }
+  let filtered: Vec<_> = report
+    .findings
+    .iter()
+    .enumerate()
+    .filter(|(_, f)| filter.is_none_or(|k| k == f.kind))
+    .collect();
+  let selection_id = ui.make_persistent_id(("diagnostics_last_selection", index));
+  let previous = ui
+    .data(|d| d.get_temp::<Option<usize>>(selection_id))
+    .flatten();
+  ui.data_mut(|d| d.insert_temp(selection_id, selected));
+  egui::CollapsingHeader::new(format!(
+    "Замечания: {} / {}",
+    filtered.len(),
+    report.findings.len()
+  ))
+  .id_salt(("dxf_check", index))
+  .open((selected.is_some() && previous != selected).then_some(true))
+  .default_open(selected.is_some())
+  .show(ui, |ui| {
+    if filtered.is_empty() {
+      ui.label("Нет замечаний выбранной категории");
+      return;
+    }
+    ui.label(RichText::new("Нажмите на замечание — показать на холсте").small());
+    let limit_id =
+      ui.make_persistent_id(("diagnostics_visible_count", index, filter.map(|k| k as u8)));
+    let shown = ui
+      .data_mut(|data| *data.get_temp_mut_or(limit_id, 50_usize))
+      .min(filtered.len());
+    for &(finding_index, finding) in filtered.iter().take(shown) {
+      if finding_button(ui, finding, finding_index, selected == Some(finding_index)).clicked() {
+        clicked = Some(finding_index);
       }
-      if shown < report.findings.len()
-        && ui
-          .button(format!(
-            "Показать ещё {} замечаний",
-            (report.findings.len() - shown).min(50)
-          ))
-          .clicked()
-      {
-        ui.data_mut(|data| data.insert_temp(limit_id, shown.saturating_add(50)));
+    }
+    if let Some(selected) = selected
+      && let Some((_, finding)) = filtered.iter().skip(shown).find(|(i, _)| *i == selected)
+    {
+      ui.label("Текущее замечание:");
+      if finding_button(ui, finding, selected, true).clicked() {
+        clicked = Some(selected);
       }
-    });
+    }
+    if shown < filtered.len()
+      && ui
+        .button(format!(
+          "Показать ещё {} замечаний",
+          (filtered.len() - shown).min(50)
+        ))
+        .clicked()
+    {
+      ui.data_mut(|data| data.insert_temp(limit_id, shown.saturating_add(50)));
+    }
+  });
   clicked
 }
 
@@ -116,16 +179,18 @@ pub fn paint_report(
   item: &DrawingItem,
   report: &DiagnosticReport,
   transform: ViewTransform,
+  filter: Option<IssueKind>,
 ) {
   let screen = |point| transform.world_to_screen(item.world_point(point));
   // Общие предупреждения рисуем за локальными маркерами, чтобы разрывы оставались видны.
   for (frame_index, kind) in IssueKind::ALL
     .into_iter()
     .filter(|kind| {
-      report
-        .findings
-        .iter()
-        .any(|finding| finding.kind == *kind && matches!(finding.marker, Marker::File))
+      filter.is_none_or(|k| k == *kind)
+        && report
+          .findings
+          .iter()
+          .any(|finding| finding.kind == *kind && matches!(finding.marker, Marker::File))
     })
     .enumerate()
   {
@@ -151,6 +216,9 @@ pub fn paint_report(
         .filter(|finding| !matches!(finding.marker, Marker::Contour(_))),
     )
   {
+    if filter.is_some_and(|k| k != finding.kind) {
+      continue;
+    }
     let stroke = Stroke::new(2.6, color(finding.kind));
     paint_marker(
       painter,
@@ -172,6 +240,7 @@ fn paint_marker(
   short: bool,
 ) {
   match *marker {
+    Marker::Span(shape) => paint_path(painter, &shape.points(), false, screen, stroke),
     Marker::File => {}
     Marker::Point(point) => {
       let p = screen(point);

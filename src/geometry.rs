@@ -150,6 +150,7 @@ impl Primitive {
 
 #[derive(Clone, Debug)]
 pub struct DrawingItem {
+  pub appearance: crate::cad_scene::Appearance,
   pub units: LengthUnit,
   pub path: std::path::PathBuf,
   pub name: String,
@@ -303,6 +304,7 @@ mod tests {
   #[test]
   fn item_can_be_moved_and_scaled_independently() {
     let mut item = DrawingItem {
+      appearance: Default::default(),
       units: LengthUnit::default(),
       path: std::path::PathBuf::from("detail.dxf"),
       name: "detail".to_owned(),

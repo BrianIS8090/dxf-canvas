@@ -5,6 +5,7 @@ mod app_icon;
 
 fn main() {
   println!("cargo:rerun-if-changed=build.rs");
+  prepare_converter();
   println!("cargo:rerun-if-changed=src/app_icon.rs");
   for variable in ["RC", "WindowsSdkDir", "ProgramFiles(x86)"] {
     println!("cargo:rerun-if-env-changed={variable}");
@@ -39,6 +40,33 @@ fn main() {
     .expect("Не удалось запустить компилятор ресурсов Windows SDK");
   assert!(status.success(), "Не удалось встроить иконку приложения");
   println!("cargo:rustc-link-arg-bin=dxf-canvas={}", compiled.display());
+}
+
+fn prepare_converter() {
+  println!("cargo:rerun-if-env-changed=DXF_CANVAS_DWG_CONVERTER");
+  let output = PathBuf::from(env::var_os("OUT_DIR").expect("Не задан OUT_DIR"));
+  let destination = output.join("dwg-converter.exe");
+  if env::var_os("CARGO_FEATURE_DWG").is_none() {
+    fs::write(destination, []).expect("Не удалось подготовить сборку без DWG");
+    return;
+  }
+  assert_eq!(
+    env::var("CARGO_CFG_TARGET_OS").as_deref(),
+    Ok("windows"),
+    "Встроенный DWG-конвертер пока доступен только для Windows"
+  );
+  assert_eq!(
+    env::var("CARGO_CFG_TARGET_ARCH").as_deref(),
+    Ok("x86_64"),
+    "DWG-конвертер собран для Windows x64"
+  );
+  let source = env::var_os("DXF_CANVAS_DWG_CONVERTER")
+    .map(PathBuf::from)
+    .unwrap_or_else(|| PathBuf::from("target/dwg-converter/DxfCanvas.DwgConverter.exe"));
+  println!("cargo:rerun-if-changed={}", source.display());
+  let bytes = fs::read(&source).expect("Сначала соберите конвертер: scripts/build-dwg-converter.ps1. Для сборки только DXF используйте --no-default-features");
+  assert!(bytes.starts_with(b"MZ"), "Ожидался Windows EXE конвертера");
+  fs::write(destination, bytes).expect("Не удалось встроить DWG-конвертер");
 }
 
 fn resource_compiler() -> PathBuf {

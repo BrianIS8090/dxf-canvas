@@ -15,10 +15,12 @@ pub enum IssueKind {
   Oval,
   UnknownUnits,
   IncompleteGeometry,
+  Intersection,
+  PartialOverlap,
 }
 
 impl IssueKind {
-  pub const ALL: [Self; 7] = [
+  pub const ALL: [Self; 9] = [
     Self::OpenContour,
     Self::UnjoinedContour,
     Self::Duplicate,
@@ -26,6 +28,8 @@ impl IssueKind {
     Self::Oval,
     Self::UnknownUnits,
     Self::IncompleteGeometry,
+    Self::Intersection,
+    Self::PartialOverlap,
   ];
 
   pub fn label(self) -> &'static str {
@@ -37,6 +41,8 @@ impl IssueKind {
       Self::Oval => "Овальность / искажение",
       Self::UnknownUnits => "Неизвестные единицы",
       Self::IncompleteGeometry => "Неполная геометрия",
+      Self::Intersection => "Пересечения / самопересечения",
+      Self::PartialOverlap => "Частичные наложения",
     }
   }
 
@@ -49,7 +55,7 @@ impl IssueKind {
         "Концы совпадают, но замкнутая цепочка состоит из нескольких отдельных объектов DXF. Это не зазор: при необходимости объедините объекты в CAD. Одна замкнутая полилиния сюда не относится."
       }
       Self::Duplicate => {
-        "Полностью совпадающие линии, дуги или контуры. Частичные наложения не проверяются."
+        "Полностью совпадающие линии, дуги или контуры. Частичные совпадения отмечаются отдельно."
       }
       Self::ShortSegment => {
         "Исходный участок короче 0,1 мм, включая нулевую длину. Деление кривой для показа на экране не считается отдельными участками."
@@ -63,6 +69,12 @@ impl IssueKind {
       Self::IncompleteGeometry => {
         "Есть неподдерживаемые сущности или некорректные координаты. Проверка охватывает только доступную двумерную геометрию; рамка относится ко всему файлу."
       }
+      Self::Intersection => {
+        "Пересечения, самопересечения и касания середины участка. Обычные стыки конец–конец не отмечаются. На планах пересечения могут быть намеренными; сплайны проверяются приближённо."
+      }
+      Self::PartialOverlap => {
+        "Совпадение части прямых или круговых дуг. Подсвечивается общий участок. Для сплайнов используется приближение отрезками."
+      }
     }
   }
 }
@@ -74,11 +86,13 @@ pub enum Marker {
   Primitive(usize),
   Contour(Vec<usize>),
   File,
+  Span(crate::planar::EdgeShape),
 }
 
 impl Marker {
   pub fn bounds(&self, item: &DrawingItem) -> Option<Bounds> {
     match self {
+      Self::Span(shape) => Some(shape.bounds()),
       Self::Point(point) => Bounds::from_points([*point]),
       Self::Primitive(index) => item.primitives.get(*index)?.bounds(),
       Self::File => item.bounds.is_valid().then_some(item.bounds),
@@ -172,6 +186,7 @@ pub struct DiagnosticsState {
   pub reports: Vec<DiagnosticReport>,
   pub selected: Option<DiagnosticSelection>,
   focus_request: Option<DiagnosticSelection>,
+  pub filter: Option<IssueKind>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,6 +196,73 @@ pub struct DiagnosticSelection {
 }
 
 impl DiagnosticsState {
+  pub fn visible_selections(&self) -> Vec<DiagnosticSelection> {
+    if !self.enabled {
+      return Vec::new();
+    }
+    self
+      .reports
+      .iter()
+      .enumerate()
+      .flat_map(|(item, report)| {
+        report
+          .findings
+          .iter()
+          .enumerate()
+          .filter(|(_, f)| self.filter.is_none_or(|kind| f.kind == kind))
+          .map(move |(finding, _)| DiagnosticSelection { item, finding })
+      })
+      .collect()
+  }
+
+  pub fn set_filter(&mut self, filter: Option<IssueKind>) {
+    self.filter = filter;
+    if self.selected.is_some_and(|s| {
+      self
+        .reports
+        .get(s.item)
+        .and_then(|r| r.findings.get(s.finding))
+        .is_none_or(|f| filter.is_some_and(|kind| kind != f.kind))
+    }) {
+      self.clear_selection();
+    }
+  }
+
+  pub fn navigation_position(&self) -> (usize, usize) {
+    let mut count = 0;
+    let mut position = 0;
+    if !self.enabled {
+      return (0, 0);
+    }
+    for (item, report) in self.reports.iter().enumerate() {
+      for (finding, f) in report.findings.iter().enumerate() {
+        if self.filter.is_none_or(|k| k == f.kind) {
+          count += 1;
+          if self.selected == Some(DiagnosticSelection { item, finding }) {
+            position = count;
+          }
+        }
+      }
+    }
+    (position, count)
+  }
+
+  pub fn navigate(&mut self, next: bool) -> bool {
+    let visible = self.visible_selections();
+    if visible.is_empty() {
+      return false;
+    }
+    let current = self
+      .selected
+      .and_then(|s| visible.iter().position(|v| *v == s));
+    let index = match (current, next) {
+      (Some(i), true) => (i + 1) % visible.len(),
+      (Some(i), false) => (i + visible.len() - 1) % visible.len(),
+      (None, true) => 0,
+      (None, false) => visible.len() - 1,
+    };
+    self.select(visible[index].item, visible[index].finding)
+  }
   pub fn toggle(&mut self, items: &[DrawingItem]) {
     self.enabled = !self.enabled;
     self.refresh(items);
@@ -199,6 +281,7 @@ impl DiagnosticsState {
     self.enabled = false;
     self.reports.clear();
     self.clear_selection();
+    self.filter = None;
   }
 
   pub fn select(&mut self, item: usize, finding: usize) -> bool {
@@ -207,7 +290,7 @@ impl DiagnosticsState {
         .reports
         .get(item)
         .and_then(|report| report.findings.get(finding))
-        .is_none()
+        .is_none_or(|f| self.filter.is_some_and(|kind| f.kind != kind))
     {
       return false;
     }
@@ -258,6 +341,9 @@ pub fn analyze(item: &DrawingItem) -> DiagnosticReport {
 
   let mut curves = Vec::new();
   for (primitive_index, primitive) in item.primitives.iter().enumerate() {
+    if !item.appearance.primitive_diagnostic(primitive_index) {
+      continue;
+    }
     if let Primitive::Path {
       points,
       closed,
@@ -403,7 +489,66 @@ pub fn analyze(item: &DrawingItem) -> DiagnosticReport {
       detail,
     );
   }
+  add_intersections(item, &mut report);
   report
+}
+
+fn add_intersections(item: &DrawingItem, report: &mut DiagnosticReport) {
+  use crate::planar::{ContactKind, contacts, drawing_edges};
+  let edges = drawing_edges(item);
+  let tolerance = 0.001 / item.units.factor();
+  let contacts = contacts(&edges.values, tolerance);
+  let mut seen = std::collections::HashSet::new();
+  for contact in contacts.values {
+    let a = edges.values[contact.a];
+    let b = edges.values[contact.b];
+    let approximation = if a.approximate || b.approximate {
+      "Приближённо: "
+    } else {
+      ""
+    };
+    let (kind, marker, anchor) = match contact.kind {
+      ContactKind::Crossing(p) => (IssueKind::Intersection, Marker::Point(p), p),
+      ContactKind::Overlap { shape, duplicate } => {
+        // Полные дубли исходных линий/дуг уже найдены основной проверкой.
+        if duplicate && a.primitive != b.primitive && !a.approximate && !b.approximate {
+          continue;
+        }
+        (
+          IssueKind::PartialOverlap,
+          Marker::Span(shape),
+          shape.bounds().center(),
+        )
+      }
+    };
+    let key = (
+      kind as u8,
+      a.primitive.min(b.primitive),
+      a.primitive.max(b.primitive),
+      cell(anchor, tolerance),
+    );
+    if !seen.insert(key) {
+      continue;
+    }
+    report.add(
+      kind,
+      marker,
+      format!(
+        "{approximation}Элементы {} и {}: {}. Проверьте назначение этих линий.",
+        a.primitive + 1,
+        b.primitive + 1,
+        if kind == IssueKind::Intersection {
+          "пересечение или касание участка"
+        } else {
+          "частично совпадающая геометрия"
+        }
+      ),
+    );
+  }
+  if edges.limited || contacts.limited {
+    report.add(IssueKind::IncompleteGeometry, Marker::File,
+      "Проверка пересечений ограничена: слишком много участков или их сочетаний. Сузьте набор видимых слоёв; отсутствие замечаний не гарантирует чистоту контура.".into());
+  }
 }
 
 fn finite(point: Point) -> bool {

@@ -1,15 +1,26 @@
 [package]
 name = "dxf-canvas"
-version = "0.5.3"
+version = "0.8.0"
 edition = "2024"
-description = "Настольное приложение для раскладки и просмотра нескольких DXF на одном холсте"
+description = "Просмотрщик DXF и DWG для Windows: общий холст, слои, измерения и диагностика геометрии"
 license = "MIT"
+
+[features]
+default = ["dwg"]
+dwg = []
 
 [dependencies]
 dxf = "0.6.1"
 eframe = "0.36.1"
 rfd = "0.15"
 thiserror = "2"
+earcutr = "0.5"
+encoding_rs = "0.8"
+tempfile = "3.27"
+serde_json = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [profile.release]
 lto = "thin"

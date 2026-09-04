@@ -15,6 +15,8 @@ const MAX_RECURSION_DEPTH: usize = 12;
 
 #[derive(Debug, Error)]
 pub enum ImportError {
+  #[error("не удалось прочитать данные DXF: {0}")]
+  Supplemental(#[from] std::io::Error),
   #[error("не удалось прочитать DXF: {0}")]
   Read(#[from] dxf::DxfError),
   #[error("в файле нет поддерживаемой двумерной геометрии")]
@@ -24,7 +26,7 @@ pub enum ImportError {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Transform2 {
+pub(crate) struct Transform2 {
   a: f64,
   b: f64,
   c: f64,
@@ -34,7 +36,7 @@ struct Transform2 {
 }
 
 impl Transform2 {
-  const IDENTITY: Self = Self {
+  pub(crate) const IDENTITY: Self = Self {
     a: 1.0,
     b: 0.0,
     c: 0.0,
@@ -43,14 +45,14 @@ impl Transform2 {
     ty: 0.0,
   };
 
-  fn apply(self, point: Point) -> Point {
+  pub(crate) fn apply(self, point: Point) -> Point {
     Point::new(
       self.a * point.x + self.c * point.y + self.tx,
       self.b * point.x + self.d * point.y + self.ty,
     )
   }
 
-  fn then(self, child: Self) -> Self {
+  pub(crate) fn then(self, child: Self) -> Self {
     Self {
       a: self.a * child.a + self.c * child.b,
       b: self.b * child.a + self.d * child.b,
@@ -61,7 +63,7 @@ impl Transform2 {
     }
   }
 
-  fn ocs(normal: &dxf::Vector, elevation: f64) -> Self {
+  pub(crate) fn ocs(normal: &dxf::Vector, elevation: f64) -> Self {
     let length = normal.x.hypot(normal.y).hypot(normal.z);
     if !length.is_finite() || length < 1.0e-12 {
       return Self::IDENTITY;
@@ -103,7 +105,7 @@ impl Transform2 {
     })
   }
 
-  fn insert(
+  pub(crate) fn insert(
     location: Point,
     base: Point,
     scale_x: f64,
@@ -128,16 +130,27 @@ impl Transform2 {
 }
 
 pub fn load_dxf(path: &Path) -> Result<DrawingItem, ImportError> {
-  let drawing = Drawing::load_file(path)?;
-  let (primitives, unsupported_entities) = extract_primitives(&drawing);
+  // Обе части импорта используют одни байты и одну кодировку, выбранную по заголовку.
+  let bytes = std::fs::read(path)?;
+  let encoding = crate::raw_dxf::text_encoding(&bytes);
+  let drawing = Drawing::load_with_encoding(&mut bytes.as_slice(), encoding)?;
+  let raw = crate::raw_dxf::RawDxf::from_bytes(&bytes, encoding);
+  drop(bytes);
+  let (primitives, appearance, unsupported_entities) = crate::dxf_scene::extract(&drawing, &raw);
   let mut bounds = Bounds::empty();
   for primitive in &primitives {
     if let Some(primitive_bounds) = primitive.bounds() {
       bounds.include_bounds(primitive_bounds);
     }
   }
+  for text in &appearance.texts {
+    bounds.include_bounds(text.bounds);
+  }
+  for fill in &appearance.fills {
+    bounds.include_bounds(fill.bounds);
+  }
 
-  if !bounds.is_valid() || primitives.is_empty() {
+  if !bounds.is_valid() {
     return Err(ImportError::NoGeometry);
   }
   bounds = padded_degenerate_bounds(bounds);
@@ -150,6 +163,7 @@ pub fn load_dxf(path: &Path) -> Result<DrawingItem, ImportError> {
     .to_owned();
 
   Ok(DrawingItem {
+    appearance,
     units: LengthUnit::from_dxf_code(drawing.header.default_drawing_units as i16),
     path: PathBuf::from(path),
     name,
@@ -161,23 +175,13 @@ pub fn load_dxf(path: &Path) -> Result<DrawingItem, ImportError> {
   })
 }
 
+#[cfg(test)]
 fn extract_primitives(drawing: &Drawing) -> (Vec<Primitive>, usize) {
-  let mut primitives = Vec::new();
-  let mut unsupported = 0;
-  for entity in drawing.entities() {
-    append_entity(
-      drawing,
-      entity,
-      Transform2::IDENTITY,
-      0,
-      &mut primitives,
-      &mut unsupported,
-    );
-  }
+  let (primitives, _, unsupported) = crate::dxf_scene::extract(drawing, &Default::default());
   (primitives, unsupported)
 }
 
-fn append_entity(
+pub(crate) fn append_entity(
   drawing: &Drawing,
   entity: &Entity,
   transform: Transform2,
@@ -426,7 +430,7 @@ fn bulge_round(start: Point, end: Point, bulge: f64) -> Option<RoundCurve> {
   })
 }
 
-fn sample_bulge(start: Point, end: Point, bulge: f64) -> Vec<Point> {
+pub(crate) fn sample_bulge(start: Point, end: Point, bulge: f64) -> Vec<Point> {
   if bulge.abs() < 1.0e-10 {
     return vec![start, end];
   }
@@ -460,7 +464,7 @@ fn sample_bulge(start: Point, end: Point, bulge: f64) -> Vec<Point> {
   )
 }
 
-fn sample_spline(spline: &dxf::entities::Spline) -> Vec<Point> {
+pub(crate) fn sample_spline(spline: &dxf::entities::Spline) -> Vec<Point> {
   if spline.control_points.len() >= 2 {
     let degree =
       (spline.degree_of_curve.max(1) as usize).min(spline.control_points.len().saturating_sub(1));
@@ -657,7 +661,8 @@ fn sample_parametric(
 }
 
 fn curve_segment_count(sweep: f64) -> usize {
-  ((sweep.abs() / std::f64::consts::TAU * CURVE_SEGMENTS as f64).ceil() as usize)
+  // Погрешность последнего разряда после DWG → DXF не должна менять число точек полукруга.
+  ((sweep.abs() / std::f64::consts::TAU * CURVE_SEGMENTS as f64 - 1.0e-10).ceil() as usize)
     .clamp(4, CURVE_SEGMENTS * 4)
 }
 
@@ -701,6 +706,159 @@ mod tests {
   };
 
   use super::*;
+
+  #[test]
+  fn legacy_dxf_keeps_cyrillic_layer_names() {
+    let source = concat!(
+      "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1018\n9\n$DWGCODEPAGE\n3\nansi_1251\n0\nENDSEC\n",
+      "0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLAYER\n70\n1\n0\nLAYER\n2\nНовый_Стены\n70\n0\n62\n3\n6\nCONTINUOUS\n0\nENDTAB\n0\nENDSEC\n",
+      "0\nSECTION\n2\nENTITIES\n0\nLINE\n8\nНовый_Стены\n10\n0\n20\n0\n11\n10\n21\n5\n0\nENDSEC\n0\nEOF\n"
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("кириллица.dxf");
+    let (bytes, _, errors) = encoding_rs::WINDOWS_1251.encode(source);
+    assert!(!errors);
+    std::fs::write(&path, bytes.as_ref()).unwrap();
+    let item = load_dxf(&path).unwrap();
+    let layer = &item.appearance.layers[item.appearance.styles[0].layer];
+    assert_eq!(layer.name, "Новый_Стены");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes.as_ref());
+  }
+
+  #[test]
+  fn header_encoding_keeps_layers_blocks_text_and_visibility_in_sync() {
+    for (version, page, encoding, name, text) in [
+      (
+        "AC1018",
+        "ansi_1251",
+        encoding_rs::WINDOWS_1251,
+        "Новый_Стены",
+        "План этажа № 1",
+      ),
+      (
+        "AC1018",
+        "ANSI_1251",
+        encoding_rs::WINDOWS_1251,
+        "Новый_Стены",
+        "План этажа № 1",
+      ),
+      (
+        "AC1018",
+        "ANSI_1252",
+        encoding_rs::WINDOWS_1252,
+        "Büro_façade",
+        "Maß 10 m²",
+      ),
+      (
+        "AC1032",
+        "ANSI_1251",
+        encoding_rs::UTF_8,
+        "Новый_Стены",
+        "План этажа № 1",
+      ),
+    ] {
+      let source = format!(
+        concat!(
+          "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\n{}\n9\n$DWGCODEPAGE\n3\n{}\n0\nENDSEC\n",
+          "0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLAYER\n70\n1\n0\nLAYER\n2\n{}\n70\n1\n62\n3\n6\nCONTINUOUS\n0\nENDTAB\n0\nENDSEC\n",
+          "0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nBlock_{}\n70\n0\n10\n0\n20\n0\n30\n0\n",
+          "0\nLINE\n8\n{}\n10\n0\n20\n0\n11\n10\n21\n5\n",
+          "0\nMTEXT\n8\n{}\n10\n0\n20\n0\n40\n1\n1\n{}\n0\nENDBLK\n0\nENDSEC\n",
+          "0\nSECTION\n2\nENTITIES\n0\nINSERT\n8\n{}\n2\nBlock_{}\n10\n0\n20\n0\n0\nENDSEC\n0\nEOF\n"
+        ),
+        version, page, name, name, name, name, text, name, name
+      );
+      let (bytes, _, errors) = encoding.encode(&source);
+      assert!(!errors);
+      let directory = tempfile::tempdir().unwrap();
+      let path = directory.path().join("encoding.dxf");
+      std::fs::write(&path, bytes.as_ref()).unwrap();
+      let item = load_dxf(&path).unwrap();
+      assert_eq!(item.unsupported_entities, 0);
+      assert_eq!(item.primitives.len(), 1);
+      let style = &item.appearance.styles[0];
+      let layer = &item.appearance.layers[style.layer];
+      assert_eq!(layer.name, name, "{version}/{page}");
+      assert!(
+        !layer.initial_visible,
+        "Данные заморозки должны относиться к тому же слою"
+      );
+      assert_eq!(style.color, eframe::egui::Color32::GREEN);
+      assert_eq!(item.appearance.texts[0].text, text, "{version}/{page}");
+      assert_eq!(item.appearance.texts[0].style.layer, style.layer);
+    }
+  }
+
+  #[test]
+  fn equivalent_half_circles_have_the_same_display_sampling() {
+    let semicircle = std::f64::consts::PI;
+    assert_eq!(curve_segment_count(semicircle), 36);
+    assert_eq!(curve_segment_count(semicircle + 1.0e-15), 36);
+    assert_eq!(curve_segment_count(-semicircle - 1.0e-15), 36);
+    assert_eq!(curve_segment_count(semicircle + 0.01), 37);
+  }
+
+  #[test]
+  fn multiline_text_is_not_discarded() {
+    let mut drawing = Drawing::new();
+    drawing.add_entity(Entity::new(EntityType::MText(dxf::entities::MText {
+      text: "Потолок\\PЭтаж 1".to_owned(),
+      insertion_point: DxfPoint::new(12.0, 30.0, 0.0),
+      initial_text_height: 2.5,
+      ..Default::default()
+    })));
+    let (_, appearance, unsupported) = crate::dxf_scene::extract(&drawing, &Default::default());
+    assert_eq!(appearance.texts.len(), 1);
+    assert_eq!(appearance.texts[0].origin, Point::new(12.0, 30.0));
+    assert_eq!(
+      crate::cad_text::plain(&appearance.texts[0].text),
+      "Потолок\nЭтаж 1"
+    );
+    assert_eq!(
+      unsupported, 0,
+      "MTEXT должен отображаться, а не пропускаться"
+    );
+  }
+
+  #[test]
+  #[ignore = "Нужен локальный эталон DXF_REFERENCE_FIXTURE, чертёж не публикуется"]
+  fn reference_drawing_has_no_missing_entities() {
+    let path = std::env::var_os("DXF_REFERENCE_FIXTURE").expect("Задайте DXF_REFERENCE_FIXTURE");
+    let started = std::time::Instant::now();
+    let item = load_dxf(Path::new(&path)).unwrap();
+    eprintln!(
+      "Эталон: {} элементов, {} пропущено, {:?}",
+      item.primitives.len(),
+      item.unsupported_entities,
+      started.elapsed()
+    );
+    eprintln!(
+      "Слои: {}, тексты: {}, заливки: {}, предупреждения: {:?}",
+      item.appearance.layers.len(),
+      item.appearance.texts.len(),
+      item.appearance.fills.len(),
+      item.appearance.warnings
+    );
+    assert_eq!(
+      item.unsupported_entities, 0,
+      "Часть эталонного чертежа не отображается"
+    );
+    assert!(item.appearance.warnings.is_empty());
+    assert_eq!(item.appearance.layers.len(), 168);
+    assert_eq!(item.appearance.source_counts["HATCH"], 566);
+    assert_eq!(item.appearance.source_counts["ARC_DIMENSION"], 7);
+    assert_eq!(item.appearance.texts.len(), 337);
+    assert_eq!(item.appearance.fills.len(), 735);
+    assert!(item.primitives.len() > 110_000);
+    assert_eq!(item.appearance.styles.len(), item.primitives.len());
+    assert!(item.appearance.fills.iter().all(|fill| {
+      !fill.indices.is_empty()
+        && fill
+          .indices
+          .iter()
+          .all(|index| (*index as usize) < fill.vertices.len())
+    }));
+  }
 
   #[test]
   fn semicircle_bulge_passes_through_expected_height() {

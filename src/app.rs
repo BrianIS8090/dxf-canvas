@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use eframe::egui::{
   self, Align2, Color32, FontFamily, FontId, KeyboardShortcut, Modifiers, PointerButton, Pos2,
@@ -8,9 +8,9 @@ use eframe::egui::{
 use crate::{
   diagnostics::DiagnosticsState,
   diagnostics_ui::{paint_report, paint_selected_finding, show_file_report, show_legend},
-  dxf_import::load_dxf,
-  geometry::{Bounds, DrawingItem, Point, Primitive, ViewTransform},
+  geometry::{Bounds, DrawingItem, Point, ViewTransform},
   layout::arrange,
+  loading::{ImportQueue, is_supported_drawing, show_loading},
   measurement::{MeasurementState, Tool},
   measurement_ui::{paint_dimension, paint_round_highlight, paint_snap},
 };
@@ -76,6 +76,8 @@ pub struct DxfCanvasApp {
   label_font_size: f32,
   measurements: MeasurementState,
   diagnostics: DiagnosticsState,
+  layer_filter: String,
+  imports: ImportQueue,
 }
 
 impl DxfCanvasApp {
@@ -94,12 +96,14 @@ impl DxfCanvasApp {
       label_font_size: DEFAULT_LABEL_FONT_SIZE,
       measurements: MeasurementState::default(),
       diagnostics: DiagnosticsState::default(),
+      layer_filter: String::new(),
+      imports: ImportQueue::default(),
     };
 
     let startup_files: Vec<_> = std::env::args_os()
       .skip(1)
       .map(PathBuf::from)
-      .filter(|path| is_dxf(path))
+      .filter(|path| is_supported_drawing(path))
       .collect();
     app.add_paths(startup_files);
     app
@@ -107,8 +111,8 @@ impl DxfCanvasApp {
 
   fn choose_files(&mut self) {
     if let Some(paths) = rfd::FileDialog::new()
-      .set_title("Выберите DXF-файлы")
-      .add_filter("Чертежи DXF", &["dxf", "DXF"])
+      .set_title("Выберите DWG- или DXF-файлы")
+      .add_filter("Чертежи DWG и DXF", &["dxf", "dwg", "DXF", "DWG"])
       .pick_files()
     {
       self.add_paths(paths);
@@ -116,38 +120,26 @@ impl DxfCanvasApp {
   }
 
   fn add_paths(&mut self, paths: Vec<PathBuf>) {
-    let mut existing: HashSet<PathBuf> = self
-      .items
-      .iter()
-      .map(|item| normalized_path(&item.path))
-      .collect();
-    let mut added = false;
-
-    for path in paths {
-      if !is_dxf(&path) {
-        self.errors.push(format!(
-          "{}: поддерживаются только файлы .dxf",
-          path.display()
-        ));
-        continue;
-      }
-      let normalized = normalized_path(&path);
-      if !existing.insert(normalized) {
-        continue;
-      }
-      match load_dxf(&path) {
-        Ok(item) => {
-          self.items.push(item);
-          added = true;
-        }
-        Err(error) => self.errors.push(format!("{}: {error}", path.display())),
-      }
+    self.errors.extend(self.imports.enqueue(paths, &self.items));
+    if self.imports.is_busy() {
+      self.interaction = None;
     }
+  }
 
-    if added {
-      self.diagnostics.refresh(&self.items);
-      self.needs_layout = true;
-      self.needs_fit = true;
+  fn poll_imports(&mut self, context: &egui::Context) {
+    if let Some(result) = self.imports.poll(context, self.diagnostics.enabled) {
+      match result {
+        Ok(loaded) => {
+          if let Some(report) = loaded.report {
+            self.diagnostics.reports.push(report);
+          }
+          self.diagnostics.clear_selection();
+          self.items.push(loaded.item);
+          self.needs_layout = true;
+          self.needs_fit = true;
+        }
+        Err(error) => self.errors.push(error),
+      }
     }
   }
 
@@ -404,7 +396,9 @@ impl DxfCanvasApp {
 
     self.focus_requested_finding(rect);
 
-    self.handle_canvas_input(ui, &response, rect);
+    if !self.imports.is_busy() {
+      self.handle_canvas_input(ui, &response, rect);
+    }
 
     if self.items.is_empty() {
       draw_empty_state(&painter, rect);
@@ -423,7 +417,7 @@ impl DxfCanvasApp {
       }
       if self.diagnostics.enabled {
         for (item, report) in self.items.iter().zip(&self.diagnostics.reports) {
-          paint_report(&painter, item, report, transform);
+          paint_report(&painter, item, report, transform, self.diagnostics.filter);
         }
       }
       for dimension in &self.measurements.completed {
@@ -481,7 +475,15 @@ impl DxfCanvasApp {
       {
         paint_selected_finding(&painter, item, finding, selection.finding, transform, rect);
       }
-      draw_canvas_help(&painter, rect, self.measurements.hint());
+      draw_canvas_help(
+        &painter,
+        rect,
+        self
+          .measurements
+          .notice
+          .as_deref()
+          .unwrap_or(self.measurements.hint()),
+      );
     }
 
     if !ui.input(|input| input.raw.hovered_files.is_empty()) {
@@ -536,6 +538,20 @@ impl DxfCanvasApp {
   }
 
   fn handle_shortcuts_and_drop(&mut self, context: &egui::Context) {
+    let dropped: Vec<_> = context.input(|input| {
+      input
+        .raw
+        .dropped_files
+        .iter()
+        .map(|file| file.path().to_path_buf())
+        .collect()
+    });
+    if !dropped.is_empty() {
+      self.add_paths(dropped);
+    }
+    if self.imports.is_busy() {
+      return;
+    }
     if !context.egui_wants_keyboard_input() {
       if context.input(|input| input.key_pressed(egui::Key::Escape)) {
         self.measurements.cancel();
@@ -551,6 +567,8 @@ impl DxfCanvasApp {
         (egui::Key::L, Tool::Linear),
         (egui::Key::D, Tool::Diameter),
         (egui::Key::R, Tool::Radius),
+        (egui::Key::G, Tool::Angle),
+        (egui::Key::A, Tool::Region),
       ] {
         if context.input(|input| input.modifiers == Modifiers::NONE && input.key_pressed(key)) {
           self.measurements.set_tool(tool);
@@ -571,18 +589,6 @@ impl DxfCanvasApp {
     if fit {
       self.needs_fit = true;
     }
-
-    let dropped: Vec<_> = context.input(|input| {
-      input
-        .raw
-        .dropped_files
-        .iter()
-        .map(|file| file.path().to_path_buf())
-        .collect()
-    });
-    if !dropped.is_empty() {
-      self.add_paths(dropped);
-    }
   }
 }
 
@@ -590,19 +596,39 @@ impl eframe::App for DxfCanvasApp {
   fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
     let context = root_ui.ctx().clone();
     self.handle_shortcuts_and_drop(&context);
+    self.poll_imports(&context);
+    if self.imports.is_busy() {
+      root_ui.disable();
+    }
 
     egui::Panel::top("toolbar")
       .frame(egui::Frame::new().fill(Color32::WHITE).inner_margin(10.0))
       .show(root_ui, |ui| {
         ui.horizontal_wrapped(|ui| {
           ui.heading(RichText::new("DXF Холст").size(20.0));
-          ui.label(
+          ui.menu_button(
             RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
               .size(13.0)
               .weak(),
+            |ui| {
+              ui.set_max_width(460.0);
+              egui::ScrollArea::vertical().max_height(450.0).show(ui, |ui| {
+                  ui.label(include_str!("../THIRD_PARTY_NOTICES.md"));
+                  ui.collapsing("Лицензия приложения", |ui| {
+                    ui.label(include_str!("../LICENSE"));
+                  });
+                  ui.collapsing("ACadSharp / CSUtilities", |ui| {
+                    ui.label(include_str!("../docs/licenses/ACADSHARP-LICENSE.txt"));
+                  });
+                  ui.collapsing(".NET NativeAOT", |ui| {
+                    ui.label(include_str!("../docs/licenses/DOTNET-LICENSE.txt"));
+                    ui.label(include_str!("../docs/licenses/DOTNET-NATIVE-NOTICES.txt"));
+                  });
+              });
+            },
           );
           ui.separator();
-          if ui.button("+ Добавить DXF").clicked() {
+          if ui.button("+ Добавить DWG/DXF").clicked() {
             self.choose_files();
           }
           if ui
@@ -655,6 +681,8 @@ impl eframe::App for DxfCanvasApp {
             (Tool::Linear, "Линейный · L"),
             (Tool::Diameter, "Ø Диаметр · D"),
             (Tool::Radius, "R Радиус · R"),
+            (Tool::Angle, "Угол · G"),
+            (Tool::Region, "Площадь / периметр · A"),
           ] {
             if ui
               .selectable_label(self.measurements.tool == tool, label)
@@ -703,9 +731,11 @@ impl eframe::App for DxfCanvasApp {
           let mut selected = self.selected_item;
           let mut item_changed = false;
           let mut clicked_finding = None;
+          let mut layers_changed = false;
+          let single_file = self.items.len() == 1;
           egui::ScrollArea::vertical().show(ui, |ui| {
             if self.diagnostics.enabled {
-              show_legend(ui, &self.diagnostics.reports);
+              show_legend(ui, &mut self.diagnostics);
             }
             for (index, item) in self.items.iter_mut().enumerate() {
               let is_selected = selected == Some(index);
@@ -738,6 +768,8 @@ impl eframe::App for DxfCanvasApp {
                           item.bounds.height() * item.units.factor(),
                           item.units.label(),
                           item.primitives.len()
+                            + item.appearance.texts.len()
+                            + item.appearance.fills.len()
                         ))
                         .small()
                         .color(Color32::from_gray(95)),
@@ -768,9 +800,22 @@ impl eframe::App for DxfCanvasApp {
                       .selected
                       .filter(|selection| selection.item == index)
                       .map(|selection| selection.finding);
-                    if let Some(finding) = show_file_report(ui, report, index, selected_finding) {
+                    if let Some(finding) =
+                      show_file_report(ui, report, index, selected_finding, self.diagnostics.filter)
+                    {
                       clicked_finding = Some((index, finding));
                       selected = Some(index);
+                    }
+                  }
+                  if is_selected || single_file {
+                    layers_changed |=
+                      crate::cad_render::layers_ui(ui, item, &mut self.layer_filter);
+                    if !item.appearance.warnings.is_empty() {
+                      ui.collapsing("Предупреждения импорта", |ui| {
+                        for warning in &item.appearance.warnings {
+                          ui.colored_label(Color32::from_rgb(160, 90, 20), warning);
+                        }
+                      });
                     }
                   }
                   if is_selected {
@@ -814,6 +859,10 @@ impl eframe::App for DxfCanvasApp {
             }
           });
           self.selected_item = selected;
+          if layers_changed {
+            self.diagnostics.refresh(&self.items);
+            self.measurements.cancel();
+          }
           if let Some((item, finding)) = clicked_finding {
             self.diagnostics.select(item, finding);
           }
@@ -849,6 +898,7 @@ impl eframe::App for DxfCanvasApp {
     egui::CentralPanel::default()
       .frame(egui::Frame::NONE)
       .show(root_ui, |ui| self.draw_canvas(ui));
+    show_loading(&context, &self.imports);
   }
 }
 
@@ -860,29 +910,7 @@ fn draw_item(
   selected: bool,
   font_size: f32,
 ) {
-  let stroke = if selected {
-    Stroke::new(1.4, Color32::from_rgb(24, 91, 178))
-  } else {
-    Stroke::new(1.15, Color32::from_rgb(31, 37, 46))
-  };
-  for primitive in &item.primitives {
-    match primitive {
-      Primitive::Path { points, closed, .. } => {
-        let mut screen_points: Vec<_> = points
-          .iter()
-          .map(|point| transform.world_to_screen(item.world_point(*point)))
-          .collect();
-        if *closed && screen_points.len() > 2 {
-          screen_points.push(screen_points[0]);
-        }
-        painter.add(egui::Shape::line(screen_points, stroke));
-      }
-      Primitive::Point(point) => {
-        let screen = transform.world_to_screen(item.world_point(*point));
-        painter.circle_filled(screen, 1.7, stroke.color);
-      }
-    }
-  }
+  crate::cad_render::paint(painter, item, transform);
 
   let placed = item.placed_bounds();
   let screen_left = transform.world_to_screen(Point::new(placed.min.x, placed.max.y));
@@ -1001,14 +1029,14 @@ fn draw_empty_state(painter: &egui::Painter, rect: Rect) {
   painter.text(
     center - Vec2::new(0.0, 32.0),
     Align2::CENTER_CENTER,
-    "Перетащите сюда DXF-файлы",
+    "Перетащите сюда DWG- или DXF-файлы",
     FontId::proportional(25.0),
     Color32::from_rgb(58, 67, 79),
   );
   painter.text(
     center + Vec2::new(0.0, 3.0),
     Align2::CENTER_CENTER,
-    "или нажмите «Добавить DXF»",
+    "или нажмите «Добавить DWG/DXF»",
     FontId::proportional(16.0),
     Color32::from_rgb(111, 120, 132),
   );
@@ -1051,23 +1079,14 @@ fn configure_fonts_and_style(context: &egui::Context) {
   context.set_theme(egui::ThemePreference::Light);
 }
 
-fn is_dxf(path: &std::path::Path) -> bool {
-  path
-    .extension()
-    .and_then(|extension| extension.to_str())
-    .is_some_and(|extension| extension.eq_ignore_ascii_case("dxf"))
-}
-
-fn normalized_path(path: &std::path::Path) -> PathBuf {
-  path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::geometry::Primitive;
 
   fn item(name: &str, offset: Point) -> DrawingItem {
     DrawingItem {
+      appearance: Default::default(),
       units: Default::default(),
       path: PathBuf::from(name),
       name: name.to_owned(),
@@ -1095,6 +1114,8 @@ mod tests {
       }],
     }];
     let mut app = DxfCanvasApp {
+      imports: ImportQueue::default(),
+      layer_filter: String::new(),
       items: vec![item("other.dxf", Point::default()), target],
       errors: vec![],
       world_bounds: None,
@@ -1120,6 +1141,40 @@ mod tests {
       ));
     app.diagnostics.toggle(&app.items);
     app
+  }
+
+  #[test]
+  fn background_import_continues_after_error_and_keeps_existing_measurements() {
+    let context = egui::Context::default();
+    let mut app = focus_test_app();
+    let before = format!("{:?}", app.measurements.completed);
+    let path = std::env::temp_dir().join(format!("dxf-canvas-loading-{}.dxf", std::process::id()));
+    crate::test_fixtures::diagnostics_drawing()
+      .save_file(&path)
+      .unwrap();
+    let missing = path.with_file_name(format!(
+      "missing-dxf-canvas-loading-{}.dxf",
+      std::process::id()
+    ));
+    app.add_paths(vec![missing, path.clone(), path.clone()]);
+    assert!(app.imports.is_busy());
+    assert_eq!(app.items.len(), 2);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.imports.is_busy() {
+      app.poll_imports(&context);
+      assert!(
+        std::time::Instant::now() < deadline,
+        "Фоновый импорт не завершился"
+      );
+      std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(app.errors.len(), 1);
+    assert_eq!(app.items.len(), 3);
+    assert_eq!(app.diagnostics.reports.len(), 3);
+    assert_eq!(format!("{:?}", app.measurements.completed), before);
+    assert!(app.needs_layout && app.needs_fit);
+    assert!(app.imports.progress().is_none());
   }
 
   #[test]
