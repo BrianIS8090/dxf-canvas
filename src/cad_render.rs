@@ -6,9 +6,10 @@ use eframe::egui::{self, Color32, Rect, Stroke};
 use std::sync::Arc;
 
 fn screen_bounds(bounds: Bounds, item: &DrawingItem, view: ViewTransform) -> Rect {
+  let bounds = item.world_bounds(bounds);
   Rect::from_two_pos(
-    view.world_to_screen(item.world_point(bounds.min)),
-    view.world_to_screen(item.world_point(bounds.max)),
+    view.world_to_screen(bounds.min),
+    view.world_to_screen(bounds.max),
   )
 }
 
@@ -40,7 +41,9 @@ pub fn paint(painter: &egui::Painter, item: &DrawingItem, view: ViewTransform) {
       .max(1.0e-12);
   let local_clip = Bounds::from_points([
     item.local_point(view.screen_to_world(clip.expand(3.0).left_top())),
+    item.local_point(view.screen_to_world(clip.expand(3.0).right_top())),
     item.local_point(view.screen_to_world(clip.expand(3.0).right_bottom())),
+    item.local_point(view.screen_to_world(clip.expand(3.0).left_bottom())),
   ]);
   let all_visible = local_clip.is_some_and(|b| {
     b.min.x <= item.bounds.min.x
@@ -285,10 +288,11 @@ fn paint_text(painter: &egui::Painter, item: &DrawingItem, view: ViewTransform, 
       let p = vertex.pos.to_vec2() + offset;
       let x = p.x as f64 * factor * text.width_factor;
       let y = p.y as f64 * factor;
-      vertex.pos = egui::pos2(
-        (x * text.x_axis.x - y * text.y_axis.x) as f32,
-        (-x * text.x_axis.y + y * text.y_axis.y) as f32,
-      );
+      let rotated = item.rotation.apply(crate::geometry::Point::new(
+        x * text.x_axis.x - y * text.y_axis.x,
+        x * text.x_axis.y - y * text.y_axis.y,
+      ));
+      vertex.pos = egui::pos2(rotated.x as f32, -rotated.y as f32);
       row_bounds.extend_with(vertex.pos);
     }
     row_data.visuals.mesh_bounds = row_bounds;
@@ -314,7 +318,7 @@ pub fn layers_ui(ui: &mut egui::Ui, item: &mut DrawingItem, filter: &mut String)
           .hint_text("Поиск слоя")
           .desired_width(f32::INFINITY),
       );
-      ui.horizontal(|ui| {
+      ui.horizontal_wrapped(|ui| {
         if ui.small_button("Все").clicked() {
           for layer in &mut item.appearance.layers {
             layer.visible = true;
@@ -335,12 +339,14 @@ pub fn layers_ui(ui: &mut egui::Ui, item: &mut DrawingItem, filter: &mut String)
       let query = filter.to_lowercase();
       egui::ScrollArea::vertical()
         .id_salt(("layers", &item.path))
-        .max_height(260.0)
+        .max_height(ui.available_height().max(80.0))
         .show(ui, |ui| {
+          let mut matches = 0;
           for (index, layer) in item.appearance.layers.iter_mut().enumerate() {
             if !query.is_empty() && !layer.name.to_lowercase().contains(&query) {
               continue;
             }
+            matches += 1;
             ui.push_id(index, |ui| {
               ui.horizontal(|ui| {
                 let (rect, _) =
@@ -364,6 +370,9 @@ pub fn layers_ui(ui: &mut egui::Ui, item: &mut DrawingItem, filter: &mut String)
               })
             });
           }
+          if matches == 0 {
+            ui.label("Слои не найдены. Измените запрос поиска.");
+          }
         });
     });
   changed
@@ -373,6 +382,31 @@ pub fn layers_ui(ui: &mut egui::Ui, item: &mut DrawingItem, filter: &mut String)
 mod tests {
   use super::*;
   use crate::geometry::Point;
+
+  #[test]
+  fn rotated_bounds_include_all_corners_not_only_the_diagonal() {
+    let mut item =
+      crate::dxf_import::load_dxf(std::path::Path::new("examples/advanced_demo.dxf")).unwrap();
+    item.rotation = crate::geometry::Rotation::new(std::f64::consts::FRAC_PI_4);
+    let view = ViewTransform {
+      scale: 1.0,
+      origin: egui::pos2(200.0, 200.0),
+    };
+    let bounds = Bounds {
+      min: Point::new(0.0, 0.0),
+      max: Point::new(100.0, 100.0),
+    };
+    let rect = screen_bounds(bounds, &item, view);
+    assert!((rect.width() - 100.0 * 2.0_f32.sqrt()).abs() < 0.001);
+    assert!((rect.height() - rect.width()).abs() < 0.001);
+    for corner in bounds.corners() {
+      assert!(
+        rect
+          .expand(0.001)
+          .contains(view.world_to_screen(item.world_point(corner)))
+      );
+    }
+  }
 
   fn dashed(painter: &egui::Painter, points: &[egui::Pos2], stroke: Stroke, pattern: &[f32]) {
     let mut lines = crate::line_batch::LineBatch::new(painter);
@@ -455,6 +489,7 @@ mod tests {
     let (primitives, appearance, unsupported_entities) =
       crate::dxf_scene::extract(&drawing, &Default::default());
     let item = DrawingItem {
+      rotation: Default::default(),
       appearance,
       primitives,
       unsupported_entities,

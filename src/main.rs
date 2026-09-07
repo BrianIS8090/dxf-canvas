@@ -7,6 +7,7 @@ mod app_icon;
 mod cad_render;
 mod cad_scene;
 mod cad_text;
+mod checking;
 mod diagnostics;
 #[cfg(test)]
 mod diagnostics_tests;
@@ -17,6 +18,8 @@ mod dxf_import;
 mod dxf_scene;
 mod geometry;
 mod hatch;
+#[cfg(test)]
+mod heavy_tests;
 mod layout;
 mod line_batch;
 mod loading;

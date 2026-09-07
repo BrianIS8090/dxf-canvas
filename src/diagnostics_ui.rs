@@ -5,6 +5,9 @@ use crate::{
   geometry::{DrawingItem, MeasureCurve, Point, Primitive, ViewTransform},
 };
 
+const MAX_OVERLAY_MARKERS: usize = 1500;
+const MAX_OVERLAY_COST: usize = 100_000;
+
 fn color(kind: IssueKind) -> Color32 {
   match kind {
     IssueKind::OpenContour => Color32::from_rgb(207, 43, 52),
@@ -20,11 +23,11 @@ fn color(kind: IssueKind) -> Color32 {
 }
 
 pub fn show_legend(ui: &mut egui::Ui, state: &mut DiagnosticsState) {
-  ui.heading("Проверка DXF");
+  ui.heading("Замечания к геометрии");
   let mut filter = state.filter;
   egui::ComboBox::from_id_salt("diagnostics_category")
     .selected_text(filter.map_or("Все категории", IssueKind::label))
-    .width(ui.available_width().min(260.0))
+    .width(ui.available_width())
     .show_ui(ui, |ui| {
       ui.selectable_value(&mut filter, None, "Все категории");
       for kind in IssueKind::ALL {
@@ -35,7 +38,7 @@ pub fn show_legend(ui: &mut egui::Ui, state: &mut DiagnosticsState) {
     state.set_filter(filter);
   }
   let (position, count) = state.navigation_position();
-  ui.horizontal(|ui| {
+  ui.horizontal_wrapped(|ui| {
     if ui
       .add_enabled(count > 0, egui::Button::new("← Назад"))
       .clicked()
@@ -63,16 +66,26 @@ pub fn show_legend(ui: &mut egui::Ui, state: &mut DiagnosticsState) {
   ui.label(RichText::new("Легенда подсветки").strong());
   for kind in IssueKind::ALL {
     let count: usize = reports.iter().map(|report| report.count(kind)).sum();
+    if count == 0 {
+      continue;
+    }
     ui.horizontal(|ui| {
-      ui.colored_label(color(kind), "●");
+      let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+      ui.painter().rect_filled(rect, 2.0, color(kind));
       ui.label(format!("{}: {count}", kind.label()))
         .on_hover_text(kind.explanation());
     });
   }
-  ui.label(RichText::new("Стыки: ≤ 0,01 мм · короткие: < 0,1 мм").small())
+  ui.collapsing("Что и как проверяется", |ui| {
+    for kind in IssueKind::ALL {
+      ui.label(RichText::new(kind.label()).strong());
+      ui.label(kind.explanation());
+    }
+    ui.label(RichText::new("Стыки: ≤ 0,01 мм · короткие: < 0,1 мм").small())
     .on_hover_text("Для файлов без единиц используются те же числовые пороги в ед. DXF. Дубли: полное совпадение с допуском 0,001 мм.");
-  ui.label(RichText::new("Это предупреждения. DXF не изменяется.").small());
-  ui.label(RichText::new("Повторное нажатие кнопки выключит подсветку.").small());
+    ui.label("На больших планах подсветка упрощается, близкие маркеры объединяются. Полный список сохранён: приблизьте участок или выберите замечание.");
+  });
+  ui.label(RichText::new("Исходник не меняется. Кнопка в шапке выключает подсветку.").small());
   ui.separator();
 }
 
@@ -110,7 +123,7 @@ pub fn show_file_report(
   ))
   .id_salt(("dxf_check", index))
   .open((selected.is_some() && previous != selected).then_some(true))
-  .default_open(selected.is_some())
+  .default_open(true)
   .show(ui, |ui| {
     if filtered.is_empty() {
       ui.label("Нет замечаний выбранной категории");
@@ -182,6 +195,10 @@ pub fn paint_report(
   filter: Option<IssueKind>,
 ) {
   let screen = |point| transform.world_to_screen(item.world_point(point));
+  let clip = painter.clip_rect().expand(16.0);
+  let mut occupied = std::collections::HashSet::new();
+  let mut painted = 0;
+  let mut cost = 0;
   // Общие предупреждения рисуем за локальными маркерами, чтобы разрывы оставались видны.
   for (frame_index, kind) in IssueKind::ALL
     .into_iter()
@@ -195,8 +212,8 @@ pub fn paint_report(
     .enumerate()
   {
     let bounds = item.bounds;
-    let rect = Rect::from_two_pos(screen(bounds.min), screen(bounds.max))
-      .expand(4.0 + frame_index as f32 * 4.0);
+    let rect =
+      transformed_marker_rect(item, transform, bounds).expand(4.0 + frame_index as f32 * 4.0);
     painter.rect_stroke(
       rect,
       4.0,
@@ -219,7 +236,40 @@ pub fn paint_report(
     if filter.is_some_and(|k| k != finding.kind) {
       continue;
     }
+    if matches!(finding.marker, Marker::File) {
+      continue;
+    }
+    let Some(bounds) = finding.marker.bounds(item) else {
+      continue;
+    };
+    let rect = transformed_marker_rect(item, transform, bounds);
+    if !rect.is_finite() || !rect.intersects(clip) {
+      continue;
+    }
+    if rect.width().max(rect.height()) <= 16.0 {
+      let p = rect.center();
+      let cell = (
+        finding.kind as u8,
+        (p.x / 12.0).floor() as i32,
+        (p.y / 12.0).floor() as i32,
+      );
+      if !occupied.insert(cell) {
+        continue;
+      }
+    }
+    if painted >= MAX_OVERLAY_MARKERS || cost >= MAX_OVERLAY_COST {
+      break;
+    }
+    painted += 1;
     let stroke = Stroke::new(2.6, color(finding.kind));
+    let marker_cost = marker_cost(item, &finding.marker);
+    if marker_cost > MAX_OVERLAY_COST - cost {
+      // Ограничивается только подсветка; полный отчёт и исходная геометрия сохраняются.
+      painter.rect_stroke(rect.expand(3.0), 0.0, stroke, StrokeKind::Outside);
+      cost += 64;
+      continue;
+    }
+    cost += marker_cost;
     paint_marker(
       painter,
       item,
@@ -228,6 +278,35 @@ pub fn paint_report(
       stroke,
       finding.kind == IssueKind::ShortSegment,
     );
+  }
+}
+
+fn marker_cost(item: &DrawingItem, marker: &Marker) -> usize {
+  let primitive_cost = |index: usize| match item.primitives.get(index) {
+    Some(Primitive::Path { points, .. }) => points.len().saturating_add(16),
+    _ => 16,
+  };
+  match marker {
+    Marker::File => 64,
+    Marker::Point(_) => 64,
+    Marker::Span(crate::planar::EdgeShape::Arc(_)) => 530,
+    Marker::Span(_) => 18,
+    Marker::Primitive(index) => primitive_cost(*index),
+    Marker::Contour(indices) => indices
+      .iter()
+      .fold(0_usize, |sum, i| sum.saturating_add(primitive_cost(*i))),
+    Marker::Curve { primitive, curve } => {
+      if let Some(Primitive::Path { curves, .. }) = item.primitives.get(*primitive) {
+        match curves.get(*curve) {
+          Some(MeasureCurve::Line { .. }) => 64,
+          Some(MeasureCurve::Round(_)) => 160,
+          Some(MeasureCurve::Polyline { points, .. }) => points.len().saturating_add(64),
+          None => 0,
+        }
+      } else {
+        0
+      }
+    }
   }
 }
 
@@ -314,25 +393,27 @@ pub fn paint_selected_finding(
     return;
   };
   let screen = |point| transform.world_to_screen(item.world_point(point));
-  let region = Rect::from_two_pos(screen(bounds.min), screen(bounds.max));
+  let region = transformed_marker_rect(item, transform, bounds);
   let selected_color = color(finding.kind);
   // Белый ореол отделяет активное замечание от соседних цветных предупреждений.
-  paint_marker(
-    painter,
-    item,
-    &finding.marker,
-    &screen,
-    Stroke::new(8.0, Color32::WHITE),
-    finding.kind == IssueKind::ShortSegment,
-  );
-  paint_marker(
-    painter,
-    item,
-    &finding.marker,
-    &screen,
-    Stroke::new(4.0, selected_color),
-    finding.kind == IssueKind::ShortSegment,
-  );
+  if marker_cost(item, &finding.marker) <= MAX_OVERLAY_COST {
+    paint_marker(
+      painter,
+      item,
+      &finding.marker,
+      &screen,
+      Stroke::new(8.0, Color32::WHITE),
+      finding.kind == IssueKind::ShortSegment,
+    );
+    paint_marker(
+      painter,
+      item,
+      &finding.marker,
+      &screen,
+      Stroke::new(4.0, selected_color),
+      finding.kind == IssueKind::ShortSegment,
+    );
+  }
   let frame =
     Rect::from_center_size(region.center(), region.size().max(Vec2::splat(14.0))).expand(12.0);
   let bracket = 12.0;
@@ -377,6 +458,18 @@ fn paint_path(
     points.push(first);
   }
   painter.add(egui::Shape::line(points, stroke));
+}
+
+fn transformed_marker_rect(
+  item: &DrawingItem,
+  view: ViewTransform,
+  bounds: crate::geometry::Bounds,
+) -> Rect {
+  let world = item.world_bounds(bounds);
+  Rect::from_two_pos(
+    view.world_to_screen(world.min),
+    view.world_to_screen(world.max),
+  )
 }
 
 #[cfg(test)]

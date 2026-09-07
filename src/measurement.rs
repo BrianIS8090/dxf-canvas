@@ -314,22 +314,42 @@ impl Dimension {
 
   pub fn text(&self, item: &DrawingItem) -> String {
     if let DimensionKind::Region(region) = &self.kind {
-      let f = item.units.factor();
+      let f = if item.units.is_known() {
+        item.units.factor() / 1000.0
+      } else {
+        1.0
+      };
+      let unit = if item.units.is_known() {
+        "м"
+      } else {
+        "ед. DXF"
+      };
+      let value = |v| {
+        if item.units.is_known() {
+          metric_number(v)
+        } else {
+          number(v)
+        }
+      };
       let mut text = format!(
-        "{}S = {} {}²\nP = {} {} · отверстий: {}",
+        "{}S = {} {}²\nP = {} {}",
         if self.approximate { "≈ " } else { "" },
-        number(region.area * f * f),
-        item.units.label(),
-        number(region.perimeter * f),
-        item.units.label(),
-        region.holes
+        value(region.area * f * f),
+        unit,
+        value(region.perimeter * f),
+        unit
       );
+      if region.contour_only {
+        text.push_str("\nОтдельный контур · без вычитания отверстий");
+      } else {
+        text.push_str(&format!(" · отверстий: {}", region.holes));
+      }
       if region.slit_count > 0 {
         text.push_str(&format!(
           "\nПрорези: {} · {} {} (включены в P)",
           region.slit_count,
-          number(region.slit_length * f),
-          item.units.label()
+          value(region.slit_length * f),
+          unit
         ));
       }
       return text;
@@ -385,12 +405,17 @@ enum Draft {
 #[derive(Default)]
 pub struct MeasurementState {
   pub tool: Tool,
+  pub contour_only: bool,
   pub completed: Vec<Dimension>,
   draft: Option<Draft>,
   pub notice: Option<String>,
 }
 
 impl MeasurementState {
+  pub fn can_undo(&self) -> bool {
+    self.draft.is_some() || !self.completed.is_empty()
+  }
+
   pub fn set_tool(&mut self, tool: Tool) {
     self.tool = tool;
     self.draft = None;
@@ -458,7 +483,12 @@ impl MeasurementState {
         if local.x < b.min.x || local.x > b.max.x || local.y < b.min.y || local.y > b.max.y {
           continue;
         }
-        match crate::region::measure_region(item, local) {
+        let measured = if self.contour_only {
+          crate::region::measure_contour(item, local)
+        } else {
+          crate::region::measure_region(item, local)
+        };
+        match measured {
           Ok(region) => {
             self.draft = Some(Draft::Place(Dimension {
               item: index,
@@ -589,10 +619,14 @@ impl MeasurementState {
         "Угол: первая точка → вершина → третья точка → размещение · Меньший угол 0–180°"
       }
       (_, Tool::Region) => {
-        "Щёлкните внутри детали · S — площадь без отверстий · P — все границы и прорези (один проход) · Только видимые слои"
+        if self.contour_only {
+          "Щёлкните внутри элемента · Меньший замкнутый объект; иначе цепочка линий/дуг · Без вычитания отверстий"
+        } else {
+          "Щёлкните внутри детали · S в м² без отверстий · P в м: границы и прорези · Для планов: «Отдельный контур»"
+        }
       }
       (_, Tool::Select) => {
-        "ЛКМ — двигать деталь · Маркеры / Ctrl+колесо — размер детали · Колесо — масштаб холста"
+        "ЛКМ — двигать · Круглый маркер — поворот, Shift: 45° · Угловые маркеры / Ctrl+колесо — масштаб детали"
       }
     }
   }
@@ -600,6 +634,19 @@ impl MeasurementState {
 
 fn number(value: f64) -> String {
   let digits = if value.abs() < 0.001 { 6 } else { 3 };
+  format!("{value:.digits$}")
+    .trim_end_matches('0')
+    .trim_end_matches('.')
+    .replace('.', ",")
+}
+
+fn metric_number(value: f64) -> String {
+  // Не округляем мелкую деталь до нуля после перевода миллиметров в метры.
+  let digits = if value == 0.0 {
+    3
+  } else {
+    (5.0 - value.abs().log10().floor()).clamp(3.0, 12.0) as usize
+  };
   format!("{value:.digits$}")
     .trim_end_matches('0')
     .trim_end_matches('.')

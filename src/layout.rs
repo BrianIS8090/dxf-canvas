@@ -2,6 +2,22 @@ use crate::geometry::{Bounds, DrawingItem, Point};
 
 const MIN_DIMENSION: f64 = 1.0;
 
+pub fn place_new_item(item: &mut DrawingItem, existing: &[DrawingItem]) {
+  let mut occupied = Bounds::empty();
+  for other in existing {
+    occupied.include_bounds(other.placed_bounds());
+  }
+  let bounds = item.scaled_bounds();
+  let (left, top) = if occupied.is_valid() {
+    let gap = (bounds.width().max(bounds.height()) * 0.08).clamp(8.0, 180.0);
+    // Новая деталь располагается за правой границей остальных, не меняя их положение.
+    (occupied.max.x + gap, occupied.max.y)
+  } else {
+    (0.0, 0.0)
+  };
+  item.offset = Point::new(left - bounds.min.x, top - bounds.max.y);
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PackedRect {
   index: usize,
@@ -153,6 +169,7 @@ mod tests {
 
   fn item(name: &str, width: f64, height: f64) -> DrawingItem {
     DrawingItem {
+      rotation: Default::default(),
       appearance: Default::default(),
       units: Default::default(),
       path: PathBuf::from(name),
@@ -189,6 +206,29 @@ mod tests {
           a.min.x < b.max.x && a.max.x > b.min.x && a.min.y < b.max.y && a.max.y > b.min.y;
         assert!(!overlaps, "объекты {left} и {right} пересеклись");
       }
+    }
+  }
+
+  #[test]
+  fn newly_added_items_avoid_existing_rotated_scaled_bounds_without_moving_them() {
+    let mut existing = vec![
+      item("first.dxf", 120.0, 50.0),
+      item("second.dxf", 40.0, 300.0),
+    ];
+    existing[0].offset = Point::new(-800.0, 400.0);
+    existing[0].scale = 3.0;
+    existing[0].rotation = crate::geometry::Rotation::new(0.8);
+    existing[1].offset = Point::new(100.0, -250.0);
+    for width in [0.0, 250.0, 0.001, 6000.0] {
+      let snapshot = format!("{existing:?}");
+      let mut added = item("added.dxf", width, 100.0);
+      place_new_item(&mut added, &existing);
+      assert_eq!(format!("{existing:?}"), snapshot);
+      assert!(added.offset.x.is_finite() && added.offset.y.is_finite());
+      for other in &existing {
+        assert!(added.placed_bounds().min.x > other.placed_bounds().max.x);
+      }
+      existing.push(added);
     }
   }
 }

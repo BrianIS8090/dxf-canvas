@@ -163,6 +163,7 @@ pub fn load_dxf(path: &Path) -> Result<DrawingItem, ImportError> {
     .to_owned();
 
   Ok(DrawingItem {
+    rotation: Default::default(),
     appearance,
     units: LengthUnit::from_dxf_code(drawing.header.default_drawing_units as i16),
     path: PathBuf::from(path),

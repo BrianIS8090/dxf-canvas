@@ -143,10 +143,10 @@ impl Marker {
     } / item.units.factor();
     let half_width = bounds.width().max(minimum_span) * 0.5;
     let half_height = bounds.height().max(minimum_span) * 0.5;
-    Bounds::from_points([
-      item.world_point(Point::new(center.x - half_width, center.y - half_height)),
-      item.world_point(Point::new(center.x + half_width, center.y + half_height)),
-    ])
+    Some(item.world_bounds(Bounds {
+      min: Point::new(center.x - half_width, center.y - half_height),
+      max: Point::new(center.x + half_width, center.y + half_height),
+    }))
   }
 }
 
@@ -263,11 +263,13 @@ impl DiagnosticsState {
     };
     self.select(visible[index].item, visible[index].finding)
   }
+  #[cfg(test)]
   pub fn toggle(&mut self, items: &[DrawingItem]) {
     self.enabled = !self.enabled;
     self.refresh(items);
   }
 
+  #[cfg(test)]
   pub fn refresh(&mut self, items: &[DrawingItem]) {
     self.clear_selection();
     self.reports = if self.enabled {

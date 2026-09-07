@@ -1,8 +1,10 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::{
-  geometry::{Bounds, DrawingItem, Point},
-  planar::{ContactKind, Contacts, Edge, EdgeShape, contacts, distance, drawing_edges},
+  geometry::{Bounds, DrawingItem, Point, Primitive},
+  planar::{
+    ContactKind, Contacts, Edge, EdgeShape, contacts, distance, drawing_edges, drawing_edges_for,
+  },
   spatial::SpatialIndex,
 };
 
@@ -16,6 +18,7 @@ pub struct RegionMeasurement {
   pub slit_count: usize,
   pub slit_length: f64,
   pub slits: Vec<Vec<Point>>,
+  pub contour_only: bool,
 }
 
 struct Boundary {
@@ -37,7 +40,7 @@ pub fn measure_region(item: &DrawingItem, point: Point) -> Result<RegionMeasurem
   let edges = drawing_edges(item);
   if edges.limited {
     return Err(
-      "Слишком много участков для расчёта площади. Оставьте видимыми только нужные слои.".into(),
+      "Слишком много участков для расчёта детали. Для элемента плана выберите «Отдельный контур» или оставьте только нужные слои.".into(),
     );
   }
   let graph = EndpointGraph::new(&edges.values, tolerance);
@@ -88,6 +91,7 @@ pub fn measure_region(item: &DrawingItem, point: Point) -> Result<RegionMeasurem
     slit_count: 0,
     slit_length: 0.0,
     slits: Vec::new(),
+    contour_only: false,
   };
   let mut comparisons = 0;
   for &i in &selected {
@@ -122,6 +126,185 @@ pub fn measure_region(item: &DrawingItem, point: Point) -> Result<RegionMeasurem
     return Err("Некорректная площадь или длина контура.".into());
   }
   Ok(result)
+}
+
+pub fn measure_contour(item: &DrawingItem, point: Point) -> Result<RegionMeasurement, String> {
+  let tolerance = 0.01 / item.units.factor();
+  let mut best: Option<(Boundary, Vec<Edge>)> = None;
+  let mut visited = HashSet::new();
+  let mut work = 0;
+  // Замкнутые DXF-объекты выбираются независимо от посторонних линий плана.
+  for index in nearby_primitives(
+    item,
+    Bounds {
+      min: point,
+      max: point,
+    },
+  ) {
+    if !item.appearance.primitive_diagnostic(index)
+      || !closed_primitive(&item.primitives[index], tolerance)
+    {
+      continue;
+    }
+    visited.insert(index);
+    consider_contour(item, &[index], point, tolerance, &mut work, &mut best)?;
+  }
+  // Замкнутый объект уже определяет нужную границу. Посторонние цепочки плана к нему не относятся.
+  if best.is_none() {
+    // Если готового объекта нет, собираем контур из отдельных LINE/ARC по соседним концам.
+    let right = best
+      .as_ref()
+      .map_or(item.bounds.max.x, |(b, _)| b.bounds.max.x);
+    let mut seeds = nearby_primitives(
+      item,
+      Bounds {
+        min: point,
+        max: Point::new(right, point.y),
+      },
+    );
+    seeds.sort_by(|a, b| {
+      let x = |i| primitive_bounds(item, i).map_or(f64::INFINITY, |b| b.min.x.max(point.x));
+      x(*a).total_cmp(&x(*b))
+    });
+    for first in seeds {
+      if visited.contains(&first)
+        || !item.appearance.primitive_diagnostic(first)
+        || closed_primitive(&item.primitives[first], tolerance)
+      {
+        continue;
+      }
+      if work > 100_000 {
+        return Err("Слишком много соседних контуров. Для однозначного выбора оставьте видимыми только нужные слои.".into());
+      }
+      let mut component = Vec::new();
+      let mut stack = vec![first];
+      visited.insert(first);
+      while let Some(index) = stack.pop() {
+        component.push(index);
+        if component.len() > 10_000 {
+          return Err("Выбранная цепочка связана с большим количеством объектов. Оставьте видимыми только нужные слои.".into());
+        }
+        for endpoint in primitive_ends(&item.primitives[index]) {
+          let neighbors =
+            nearby_primitives(item, crate::spatial::neighborhood(endpoint, tolerance));
+          work += neighbors.len();
+          if work > 200_000 {
+            return Err("Слишком плотная геометрия для локального расчёта. Оставьте видимыми только нужные слои.".into());
+          }
+          for neighbor in neighbors {
+            if visited.contains(&neighbor)
+              || !item.appearance.primitive_diagnostic(neighbor)
+              || closed_primitive(&item.primitives[neighbor], tolerance)
+            {
+              continue;
+            }
+            if primitive_ends(&item.primitives[neighbor])
+              .iter()
+              .any(|p| distance(*p, endpoint) <= tolerance)
+            {
+              visited.insert(neighbor);
+              stack.push(neighbor);
+            }
+          }
+        }
+      }
+      consider_contour(item, &component, point, tolerance, &mut work, &mut best)?;
+    }
+  }
+  let (boundary, edges) = best.ok_or("Не найден отдельный замкнутый контур под курсором. Приблизьте элемент; проверьте видимость слоёв, разрывы и разветвления.")?;
+  let selected_edges: Vec<_> = boundary.edges.iter().map(|i| edges[*i]).collect();
+  let intersections = contacts(&selected_edges, 0.001 / item.units.factor());
+  if intersections.limited || !intersections.values.is_empty() {
+    return Err(
+      "Выбранный контур пересекает или дублирует сам себя; достоверную площадь определить нельзя."
+        .into(),
+    );
+  }
+  Ok(RegionMeasurement {
+    area: boundary.area,
+    perimeter: boundary.perimeter,
+    approximate: boundary.approximate,
+    boundaries: vec![boundary.points],
+    holes: 0,
+    slit_count: 0,
+    slit_length: 0.0,
+    slits: Vec::new(),
+    contour_only: true,
+  })
+}
+
+fn consider_contour(
+  item: &DrawingItem,
+  indices: &[usize],
+  point: Point,
+  tolerance: f64,
+  work: &mut usize,
+  best: &mut Option<(Boundary, Vec<Edge>)>,
+) -> Result<(), String> {
+  let edges = drawing_edges_for(item, indices.iter().copied());
+  *work += edges.values.len();
+  if edges.limited || edges.values.len() > 20_000 || *work > 200_000 {
+    return Err(
+      "Слишком сложный контур для локального расчёта. Оставьте видимыми только нужные слои.".into(),
+    );
+  }
+  let graph = EndpointGraph::new(&edges.values, tolerance);
+  let candidate = boundaries(&edges.values, &graph)?
+    .into_iter()
+    .filter(|b| contains_bounds(b.bounds, point) && inside(&b.points, point))
+    .min_by(|a, b| a.area.total_cmp(&b.area));
+  if let Some(candidate) = candidate
+    && best.as_ref().is_none_or(|(b, _)| candidate.area < b.area)
+  {
+    *best = Some((candidate, edges.values));
+  }
+  Ok(())
+}
+
+fn primitive_bounds(item: &DrawingItem, index: usize) -> Option<Bounds> {
+  item
+    .appearance
+    .primitive_bounds
+    .get(index)
+    .copied()
+    .or_else(|| item.primitives.get(index)?.bounds())
+}
+
+fn nearby_primitives(item: &DrawingItem, bounds: Bounds) -> Vec<usize> {
+  if item.appearance.snap_index.matches(item.primitives.len()) {
+    return item.appearance.snap_index.query(bounds);
+  }
+  item
+    .primitives
+    .iter()
+    .enumerate()
+    .filter_map(|(i, p)| {
+      let b = p.bounds()?;
+      (b.max.x >= bounds.min.x
+        && b.min.x <= bounds.max.x
+        && b.max.y >= bounds.min.y
+        && b.min.y <= bounds.max.y)
+        .then_some(i)
+    })
+    .collect()
+}
+
+fn primitive_ends(primitive: &Primitive) -> Vec<Point> {
+  match primitive {
+    Primitive::Path { points, .. } if points.len() >= 2 => {
+      vec![points[0], points[points.len() - 1]]
+    }
+    _ => Vec::new(),
+  }
+}
+
+fn closed_primitive(primitive: &Primitive, tolerance: f64) -> bool {
+  match primitive {
+    Primitive::Path { closed, points, .. } if points.len() >= 3 => {
+      *closed || distance(points[0], points[points.len() - 1]) <= tolerance
+    }
+    _ => false,
+  }
 }
 
 struct EndpointGraph {

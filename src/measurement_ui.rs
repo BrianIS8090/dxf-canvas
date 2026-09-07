@@ -89,7 +89,7 @@ pub fn paint_dimension(
     } => {
       let center = screen(vertex);
       let radius = center.distance(screen(dimension.label)).max(24.0);
-      let start = (first.y - vertex.y).atan2(first.x - vertex.x);
+      let start = (first.y - vertex.y).atan2(first.x - vertex.x) + item.rotation.radians();
       let sweep = crate::measurement::angle_radians(first, vertex, last);
       let points: Vec<_> = (0..=64)
         .map(|i| {
@@ -224,6 +224,7 @@ mod tests {
   #[test]
   fn rendered_dimension_keeps_source_value_when_detail_is_enlarged() {
     let item = DrawingItem {
+      rotation: Default::default(),
       appearance: Default::default(),
       path: "detail.dxf".into(),
       name: "detail".into(),

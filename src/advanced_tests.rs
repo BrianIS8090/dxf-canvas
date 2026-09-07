@@ -2,7 +2,7 @@ use crate::{
   diagnostics::{DiagnosticsState, IssueKind, Marker, analyze},
   geometry::{DrawingItem, Point, ViewTransform},
   measurement::{DimensionKind, MeasurementState, Tool},
-  region::measure_region,
+  region::{measure_contour, measure_region},
 };
 use dxf::{
   Drawing,
@@ -53,6 +53,163 @@ fn circle(drawing: &mut Drawing, x: f64, y: f64, radius: f64) {
 
 fn near(actual: f64, expected: f64) {
   assert!((actual - expected).abs() < 1e-7, "{actual} != {expected}");
+}
+
+#[test]
+fn rotated_scaled_detail_keeps_snaps_diameter_area_perimeter_and_diagnostics() {
+  let mut d = drawing();
+  rectangle(&mut d, 0.0, 0.0, 100.0, 50.0);
+  circle(&mut d, 20.0, 20.0, 5.0);
+  let mut item = imported(d);
+  let base = measure_region(&item, Point::new(60.0, 30.0)).unwrap();
+  let findings = analyze(&item).findings.len();
+  item.scale = 2.7;
+  item.offset = Point::new(1000.0, -800.0);
+  item.rotation = crate::geometry::Rotation::new(73.0_f64.to_radians());
+  let view = ViewTransform {
+    scale: 3.0,
+    origin: eframe::egui::pos2(-2500.0, -1500.0),
+  };
+  let endpoint = view.world_to_screen(item.world_point(Point::new(0.0, 0.0)));
+  let snap =
+    crate::measurement::snap_point(std::slice::from_ref(&item), view, endpoint, None).unwrap();
+  near(snap.point.x, 0.0);
+  near(snap.point.y, 0.0);
+  let mut state = MeasurementState::default();
+  state.set_tool(Tool::Diameter);
+  let hole = view.world_to_screen(item.world_point(Point::new(25.0, 20.0)));
+  state.click(std::slice::from_ref(&item), view, hole);
+  state.click(
+    std::slice::from_ref(&item),
+    view,
+    hole + eframe::egui::vec2(50.0, 30.0),
+  );
+  near(state.completed[0].value(), 10.0);
+  state.set_tool(Tool::Region);
+  let inside = view.world_to_screen(item.world_point(Point::new(60.0, 30.0)));
+  state.click(std::slice::from_ref(&item), view, inside);
+  state.click(
+    std::slice::from_ref(&item),
+    view,
+    inside + eframe::egui::vec2(20.0, 20.0),
+  );
+  let DimensionKind::Region(region) = &state.completed[1].kind else {
+    panic!("Ожидалось измерение площади");
+  };
+  near(region.area, base.area);
+  near(region.perimeter, base.perimeter);
+  assert_eq!(analyze(&item).findings.len(), findings);
+}
+
+#[test]
+fn unrelated_open_lines_do_not_block_a_closed_element_on_a_plan() {
+  let mut d = drawing();
+  circle(&mut d, 0.0, 0.0, 100.0);
+  for i in 1..=33 {
+    let x = i as f64 * 2.0;
+    line(&mut d, (x, -1.0), (x, 1.0));
+  }
+  let result = measure_contour(&imported(d), Point::new(0.0, 0.0)).unwrap();
+  near(result.area, 10_000.0 * std::f64::consts::PI);
+  near(result.perimeter, 200.0 * std::f64::consts::PI);
+}
+
+#[test]
+fn individual_contour_is_local_and_selects_the_innermost_visible_boundary() {
+  let mut d = drawing();
+  for radius in [100.0, 20.0, 10.0] {
+    circle(&mut d, 0.0, 0.0, radius);
+  }
+  line(&mut d, (-200.0, 0.0), (200.0, 0.0));
+  rectangle(&mut d, 200.0, 0.0, 100.0, 100.0);
+  let mut item = imported(d);
+  item.unsupported_entities = 1;
+  let result = measure_contour(&item, Point::new(1.0, 1.0)).unwrap();
+  near(result.area, 100.0 * std::f64::consts::PI);
+  near(result.perimeter, 20.0 * std::f64::consts::PI);
+  assert!(result.contour_only);
+  assert_eq!(result.holes, 0);
+  assert_eq!(result.slit_count, 0);
+  item.appearance.styles[2].visible = false;
+  near(
+    measure_contour(&item, Point::new(1.0, 1.0)).unwrap().area,
+    400.0 * std::f64::consts::PI,
+  );
+  let rectangle = measure_contour(&item, Point::new(210.0, 10.0)).unwrap();
+  near(rectangle.area, 10_000.0);
+  near(rectangle.perimeter, 400.0);
+}
+
+#[test]
+fn individual_contour_assembles_lines_arcs_and_ignores_other_holes() {
+  let item = crate::dxf_import::load_dxf(
+    &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/measurement_demo.dxf"),
+  )
+  .unwrap();
+  let result = measure_contour(&item, Point::new(20.0, 20.0)).unwrap();
+  near(result.area, 15600.0 + 100.0 * std::f64::consts::PI);
+  near(result.perimeter, 440.0 + 20.0 * std::f64::consts::PI);
+  assert!(!result.approximate);
+  assert_eq!(result.holes, 0);
+}
+
+#[test]
+fn individual_contour_does_not_bridge_real_gaps_or_accept_a_self_crossing() {
+  let mut d = drawing();
+  line(&mut d, (0.0, 0.0), (100.0, 0.0));
+  line(&mut d, (100.0, 0.0), (100.0, 100.0));
+  line(&mut d, (100.0, 100.0), (0.0, 100.0));
+  line(&mut d, (0.0, 100.0), (0.0, 1.0));
+  assert!(measure_contour(&imported(d), Point::new(20.0, 20.0)).is_err());
+  let mut d = drawing();
+  for (a, b) in [
+    ((0.0, 0.0), (100.0, 100.0)),
+    ((100.0, 100.0), (0.0, 100.0)),
+    ((0.0, 100.0), (80.0, 0.0)),
+    ((80.0, 0.0), (0.0, 0.0)),
+  ] {
+    line(&mut d, a, b);
+  }
+  assert!(measure_contour(&imported(d), Point::new(45.0, 90.0)).is_err());
+}
+
+#[test]
+fn contour_tool_preserves_small_metric_values_and_unknown_units() {
+  for (units, area, perimeter) in [
+    (Units::Millimeters, "0,000001 м²", "0,004 м"),
+    (Units::Meters, "1 м²", "4 м"),
+    (Units::Unitless, "1 ед. DXF²", "4 ед. DXF"),
+  ] {
+    let mut d = drawing();
+    d.header.default_drawing_units = units;
+    rectangle(&mut d, 0.0, 0.0, 1.0, 1.0);
+    let mut item = imported(d);
+    item.offset = Point::new(1000.0, 500.0);
+    item.scale = 5.0;
+    let view = ViewTransform {
+      scale: 10.0,
+      origin: eframe::egui::Pos2::ZERO,
+    };
+    let screen = |p| view.world_to_screen(item.world_point(p));
+    let mut state = MeasurementState::default();
+    state.set_tool(Tool::Region);
+    state.contour_only = true;
+    state.click(
+      std::slice::from_ref(&item),
+      view,
+      screen(Point::new(0.5, 0.5)),
+    );
+    assert!(state.notice.is_none(), "{:?}", state.notice);
+    state.click(
+      std::slice::from_ref(&item),
+      view,
+      screen(Point::new(2.0, 2.0)),
+    );
+    let text = state.completed[0].text(&item);
+    assert!(text.contains(area), "{text}");
+    assert!(text.contains(perimeter), "{text}");
+    assert!(text.contains("без вычитания отверстий"), "{text}");
+  }
 }
 
 #[test]
@@ -187,10 +344,10 @@ fn relief_slit_preview_and_placed_label_use_source_units_not_visual_scale() {
     .preview(std::slice::from_ref(&item), view, label)
     .unwrap();
   let text = preview.text(&item);
-  assert!(text.contains("1290,32 мм²"), "{text}");
-  assert!(text.contains("165,1 мм"), "{text}");
+  assert!(text.contains("0,00129032 м²"), "{text}");
+  assert!(text.contains("0,1651 м"), "{text}");
   assert!(
-    text.contains("Прорези: 1 · 12,7 мм (включены в P)"),
+    text.contains("Прорези: 1 · 0,0127 м (включены в P)"),
     "{text}"
   );
   let DimensionKind::Region(region) = &preview.kind else {
@@ -325,8 +482,8 @@ fn area_tool_places_a_dimension_converts_square_units_and_undoes_it() {
       screen(Point::new(3.0, 2.0)),
     )
     .unwrap();
-  assert!(preview.text(&item).contains("1290,32 мм²"));
-  assert!(preview.text(&item).contains("152,4 мм"));
+  assert!(preview.text(&item).contains("0,00129032 м²"));
+  assert!(preview.text(&item).contains("0,1524 м"));
   state.click(
     std::slice::from_ref(&item),
     view,

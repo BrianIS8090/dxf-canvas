@@ -77,6 +77,62 @@ impl Bounds {
       max: Point::new(self.max.x + offset.x, self.max.y + offset.y),
     }
   }
+
+  pub fn corners(self) -> [Point; 4] {
+    [
+      self.min,
+      Point::new(self.max.x, self.min.y),
+      self.max,
+      Point::new(self.min.x, self.max.y),
+    ]
+  }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Rotation {
+  radians: f64,
+  sin: f64,
+  cos: f64,
+}
+
+impl Default for Rotation {
+  fn default() -> Self {
+    Self {
+      radians: 0.0,
+      sin: 0.0,
+      cos: 1.0,
+    }
+  }
+}
+
+impl Rotation {
+  pub fn new(radians: f64) -> Self {
+    if !radians.is_finite() {
+      return Self::default();
+    }
+    let radians =
+      (radians + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
+    let (sin, cos) = radians.sin_cos();
+    Self { radians, sin, cos }
+  }
+
+  pub fn radians(self) -> f64 {
+    self.radians
+  }
+
+  pub fn apply(self, point: Point) -> Point {
+    Point::new(
+      self.cos * point.x - self.sin * point.y,
+      self.sin * point.x + self.cos * point.y,
+    )
+  }
+
+  fn inverse(self, point: Point) -> Point {
+    Point::new(
+      self.cos * point.x + self.sin * point.y,
+      -self.sin * point.x + self.cos * point.y,
+    )
+  }
 }
 
 #[derive(Clone, Debug)]
@@ -158,6 +214,7 @@ pub struct DrawingItem {
   pub bounds: Bounds,
   pub offset: Point,
   pub scale: f64,
+  pub rotation: Rotation,
   pub unsupported_entities: usize,
 }
 
@@ -221,17 +278,14 @@ impl LengthUnit {
 
 impl DrawingItem {
   pub fn scaled_bounds(&self) -> Bounds {
-    let center = self.bounds.center();
-    Bounds {
-      min: Point::new(
-        center.x + (self.bounds.min.x - center.x) * self.scale,
-        center.y + (self.bounds.min.y - center.y) * self.scale,
-      ),
-      max: Point::new(
-        center.x + (self.bounds.max.x - center.x) * self.scale,
-        center.y + (self.bounds.max.y - center.y) * self.scale,
-      ),
-    }
+    // Габарит учитывает поворот, но не перенос: используется при автоматической раскладке.
+    Bounds::from_points(
+      self
+        .bounds
+        .corners()
+        .map(|point| self.transformed_point(point)),
+    )
+    .unwrap_or(self.bounds)
   }
 
   pub fn placed_bounds(&self) -> Bounds {
@@ -239,19 +293,34 @@ impl DrawingItem {
   }
 
   pub fn world_point(&self, point: Point) -> Point {
+    let point = self.transformed_point(point);
+    Point::new(point.x + self.offset.x, point.y + self.offset.y)
+  }
+
+  fn transformed_point(&self, point: Point) -> Point {
     let center = self.bounds.center();
-    Point::new(
-      center.x + (point.x - center.x) * self.scale + self.offset.x,
-      center.y + (point.y - center.y) * self.scale + self.offset.y,
-    )
+    // Синус и косинус сохраняются при изменении угла, а не вычисляются для каждой вершины.
+    let rotated = self.rotation.apply(Point::new(
+      (point.x - center.x) * self.scale,
+      (point.y - center.y) * self.scale,
+    ));
+    Point::new(center.x + rotated.x, center.y + rotated.y)
   }
 
   pub fn local_point(&self, world: Point) -> Point {
     let center = self.bounds.center();
+    let unrotated = self.rotation.inverse(Point::new(
+      world.x - self.offset.x - center.x,
+      world.y - self.offset.y - center.y,
+    ));
     Point::new(
-      center.x + (world.x - self.offset.x - center.x) / self.scale,
-      center.y + (world.y - self.offset.y - center.y) / self.scale,
+      center.x + unrotated.x / self.scale,
+      center.y + unrotated.y / self.scale,
     )
+  }
+
+  pub fn world_bounds(&self, bounds: Bounds) -> Bounds {
+    Bounds::from_points(bounds.corners().map(|p| self.world_point(p))).unwrap_or(bounds)
   }
 
   pub fn set_scale_keeping_anchor(&mut self, scale: f64, local_anchor: Point, world_anchor: Point) {
@@ -304,6 +373,7 @@ mod tests {
   #[test]
   fn item_can_be_moved_and_scaled_independently() {
     let mut item = DrawingItem {
+      rotation: Default::default(),
       appearance: Default::default(),
       units: LengthUnit::default(),
       path: std::path::PathBuf::from("detail.dxf"),

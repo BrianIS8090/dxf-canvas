@@ -104,12 +104,16 @@ pub struct Edges {
 }
 
 pub fn drawing_edges(item: &DrawingItem) -> Edges {
+  drawing_edges_for(item, 0..item.primitives.len())
+}
+
+pub fn drawing_edges_for(item: &DrawingItem, indices: impl IntoIterator<Item = usize>) -> Edges {
   let mut result = Edges::default();
-  for (primitive, shape) in item.primitives.iter().enumerate() {
+  for primitive in indices {
     if !item.appearance.primitive_diagnostic(primitive) {
       continue;
     }
-    let Primitive::Path { curves, .. } = shape else {
+    let Some(Primitive::Path { curves, .. }) = item.primitives.get(primitive) else {
       continue;
     };
     for curve in curves {
