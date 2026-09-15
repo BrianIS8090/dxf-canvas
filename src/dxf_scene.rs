@@ -10,10 +10,27 @@ use crate::{
   cad_scene::{Appearance, CadFill, CadText, EntityStyle, Layer, indexed_color},
   dxf_import::{Transform2, append_entity},
   geometry::{Bounds, Point, Primitive},
-  raw_dxf::RawDxf,
+  raw_dxf::{RawDxf, Record},
 };
 
 pub fn extract(drawing: &Drawing, raw: &RawDxf) -> (Vec<Primitive>, Appearance, usize) {
+  // Сопоставляем также MTEXT без handle; повторные вставки блока используют одну запись.
+  let mut mtexts = HashMap::new();
+  let mut index_texts = |name: &str, entities: Vec<&Entity>| {
+    if let Some(records) = raw.mtexts.get(name) {
+      for (entity, record) in entities
+        .into_iter()
+        .filter(|entity| matches!(entity.specific, EntityType::MText(_)))
+        .zip(records)
+      {
+        mtexts.insert(entity as *const Entity as usize, record);
+      }
+    }
+  };
+  index_texts("", drawing.entities().collect());
+  for block in drawing.blocks() {
+    index_texts(&block.name, block.entities.iter().collect());
+  }
   let mut builder = Builder {
     drawing,
     raw,
@@ -21,6 +38,7 @@ pub fn extract(drawing: &Drawing, raw: &RawDxf) -> (Vec<Primitive>, Appearance, 
     appearance: Appearance::default(),
     unsupported: 0,
     layer_ids: HashMap::new(),
+    mtexts,
   };
   for layer in drawing.layers() {
     builder.layer(&layer.name);
@@ -153,6 +171,7 @@ pub fn extract(drawing: &Drawing, raw: &RawDxf) -> (Vec<Primitive>, Appearance, 
 struct Builder<'a> {
   drawing: &'a Drawing,
   raw: &'a RawDxf,
+  mtexts: HashMap<usize, &'a Record>,
   geometry: Vec<Primitive>,
   appearance: Appearance,
   unsupported: usize,
@@ -357,10 +376,12 @@ impl Builder<'_> {
       }
       EntityType::MText(text) => {
         let content = text.extended_text.join("") + &text.text;
-        let raw_direction = self
-          .raw
-          .entity_overrides
-          .get(&entity.common.handle.0)
+        let raw_text = self
+          .mtexts
+          .get(&(entity as *const Entity as usize))
+          .copied()
+          .or_else(|| self.raw.entity_overrides.get(&entity.common.handle.0));
+        let raw_direction = raw_text
           .and_then(|raw| {
             raw
               .pairs
@@ -374,14 +395,16 @@ impl Builder<'_> {
           if use_direction && text.x_axis_direction.x.hypot(text.x_axis_direction.y) > 1.0e-12 {
             text.x_axis_direction.y.atan2(text.x_axis_direction.x)
           } else {
-            text.rotation_angle
+            text.rotation_angle.to_radians()
           };
         let attachment = (text.attachment_point as usize).saturating_sub(1).min(8);
         self.text(
           content,
           Point::new(text.insertion_point.x, text.insertion_point.y),
           text.initial_text_height,
-          text.reference_rectangle_width,
+          raw_text
+            .map_or(text.reference_rectangle_width, |raw| raw.number(41, 0.0))
+            .max(0.0),
           1.0,
           angle,
           [
@@ -389,6 +412,8 @@ impl Builder<'_> {
             ((attachment / 3) as f64) * 0.5,
           ],
           text.line_spacing_factor as f32,
+          &text.text_style_name,
+          false,
           transform,
           style,
         );
@@ -421,6 +446,8 @@ impl Builder<'_> {
             },
           ],
           1.0,
+          &text.text_style_name,
+          vertical == 0 && horizontal != 4,
           transform.then(Transform2::ocs(&text.normal, text.location.z)),
           style,
         );
@@ -436,6 +463,8 @@ impl Builder<'_> {
             text.rotation.to_radians(),
             [0.0, 1.0],
             1.0,
+            &text.text_style_name,
+            true,
             transform.then(Transform2::ocs(&text.normal, text.location.z)),
             style,
           );
@@ -452,6 +481,8 @@ impl Builder<'_> {
             text.rotation.to_radians(),
             [0.0, 1.0],
             1.0,
+            &text.text_style_name,
+            true,
             transform.then(Transform2::ocs(&text.normal, text.location.z)),
             style,
           );
@@ -602,6 +633,8 @@ impl Builder<'_> {
     angle: f64,
     alignment: [f64; 2],
     spacing: f32,
+    text_style: &str,
+    baseline: bool,
     transform: Transform2,
     style: EntityStyle,
   ) {
@@ -609,6 +642,22 @@ impl Builder<'_> {
       return;
     }
     let height = height.abs().max(0.01);
+    let font_file = self
+      .drawing
+      .styles()
+      .find(|style| style.name.eq_ignore_ascii_case(text_style))
+      .map(|style| style.primary_font_file_name.as_str())
+      .unwrap_or(text_style);
+    let font = crate::cad_text::fonts::CadFont::from_name(font_file)
+      .or_else(|| crate::cad_text::fonts::CadFont::from_name(text_style));
+    if font.is_none() {
+      let warning = format!(
+        "Шрифт «{font_file}» (стиль «{text_style}») заменён на резервный; форма и ширина букв могут отличаться от CAD. SHX пока не поддерживается."
+      );
+      if !self.appearance.warnings.contains(&warning) {
+        self.appearance.warnings.push(warning);
+      }
+    }
     let origin = transform.apply(location);
     let (sin, cos) = angle.sin_cos();
     let x = transform.apply(Point::new(location.x + cos, location.y + sin));
@@ -655,6 +704,8 @@ impl Builder<'_> {
         width_factor,
         alignment,
         line_spacing: spacing.clamp(0.5, 3.0),
+        font: font.unwrap_or_default(),
+        baseline,
         style,
         bounds,
       });
@@ -886,12 +937,99 @@ mod tests {
 
   #[test]
   fn mtext_rotation_code_is_not_overridden_by_default_direction() {
-    let source = "0\nSECTION\n2\nENTITIES\n0\nMTEXT\n5\nAB\n10\n0\n20\n0\n30\n0\n40\n2\n50\n1.5707963267948966\n1\nText\n0\nENDSEC\n0\nEOF\n";
+    let source = "0\nSECTION\n2\nENTITIES\n0\nMTEXT\n5\nAB\n10\n0\n20\n0\n30\n0\n40\n2\n50\n90\n1\nText\n0\nENDSEC\n0\nEOF\n";
     let drawing = Drawing::load(&mut std::io::Cursor::new(source.as_bytes())).unwrap();
     let (_, appearance, missing) = extract(&drawing, &RawDxf::parse(source));
     assert_eq!(missing, 0);
     assert!(appearance.texts[0].x_axis.x.abs() < 1.0e-8);
     assert!((appearance.texts[0].x_axis.y - 1.0).abs() < 1.0e-8);
+  }
+
+  #[test]
+  fn mtext_width_presence_and_degree_angles_survive_import() {
+    for handle in ["", "5\nAB\n"] {
+      for (width, expected) in [
+        ("", 0.0),
+        ("41\n0\n", 0.0),
+        ("41\n1\n", 1.0),
+        ("41\n20\n", 20.0),
+      ] {
+        for angle in [0.0_f64, 1.0, 45.0, 90.0, -90.0, 270.0] {
+          let source = format!(
+            "0\nSECTION\n2\nENTITIES\n0\nMTEXT\n{handle}10\n0\n20\n0\n40\n2.5\n{width}50\n{angle}\n1\n11.5\n0\nENDSEC\n0\nEOF\n"
+          );
+          let drawing = Drawing::load(&mut std::io::Cursor::new(source.as_bytes())).unwrap();
+          let (_, appearance, _) = extract(&drawing, &RawDxf::parse(&source));
+          let text = &appearance.texts[0];
+          assert_eq!(
+            text.width, expected,
+            "Ширина: {width:?}, handle: {handle:?}"
+          );
+          assert!((text.x_axis.x - angle.to_radians().cos()).abs() < 1.0e-8);
+          assert!((text.x_axis.y - angle.to_radians().sin()).abs() < 1.0e-8);
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn mtext_last_direction_or_rotation_group_wins() {
+    for (groups, degrees) in [
+      ("50\n90\n11\n1\n21\n0\n", 0.0_f64),
+      ("11\n1\n21\n0\n50\n45\n", 45.0),
+    ] {
+      let source = format!(
+        "0\nSECTION\n2\nENTITIES\n0\nMTEXT\n5\nAB\n40\n2.5\n{groups}1\n36\n0\nENDSEC\n0\nEOF\n"
+      );
+      let drawing = Drawing::load(&mut std::io::Cursor::new(source.as_bytes())).unwrap();
+      let (_, appearance, _) = extract(&drawing, &RawDxf::parse(&source));
+      assert!((appearance.texts[0].x_axis.x - degrees.to_radians().cos()).abs() < 1.0e-8);
+    }
+  }
+
+  #[test]
+  fn anonymous_mtext_metadata_is_reused_by_rotated_block_inserts() {
+    let source = concat!(
+      "0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nTextBlock\n70\n0\n10\n0\n20\n0\n30\n0\n",
+      "0\nMTEXT\n40\n2.5\n50\n45\n1\n36\n",
+      "0\nMTEXT\n40\n2.5\n41\n1\n1\nX\n",
+      "0\nENDBLK\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n",
+      "0\nINSERT\n2\nTextBlock\n10\n0\n20\n0\n",
+      "0\nINSERT\n2\nTextBlock\n10\n100\n20\n0\n50\n45\n0\nENDSEC\n0\nEOF\n"
+    );
+    let drawing = Drawing::load(&mut std::io::Cursor::new(source.as_bytes())).unwrap();
+    let (_, appearance, _) = extract(&drawing, &RawDxf::parse(source));
+    let texts = &appearance.texts;
+    assert_eq!(texts.len(), 4);
+    assert_eq!(
+      texts.iter().map(|text| text.width).collect::<Vec<_>>(),
+      vec![0.0, 1.0, 0.0, 1.0]
+    );
+    assert!((texts[0].x_axis.x - std::f64::consts::FRAC_1_SQRT_2).abs() < 1.0e-8);
+    assert!(texts[2].x_axis.x.abs() < 1.0e-8);
+    assert!((texts[2].x_axis.y - 1.0).abs() < 1.0e-8);
+  }
+
+  #[test]
+  fn text_style_resolves_font_file_and_reports_shx_fallback() {
+    let source = concat!(
+      "0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nSTYLE\n70\n1\n0\nSTYLE\n2\nDimensions\n3\nOpenSansCondensed-Light.ttf\n0\nENDTAB\n0\nENDSEC\n",
+      "0\nSECTION\n2\nENTITIES\n0\nMTEXT\n40\n2.5\n7\nDimensions\n1\n36\n",
+      "0\nTEXT\n40\n2\n1\nCaption\n0\nENDSEC\n0\nEOF\n"
+    );
+    let drawing = Drawing::load(&mut std::io::Cursor::new(source.as_bytes())).unwrap();
+    let (_, appearance, missing) = extract(&drawing, &RawDxf::parse(source));
+    assert_eq!(missing, 0);
+    assert_eq!(
+      appearance.texts[0].font,
+      crate::cad_text::fonts::CadFont::CondensedLight
+    );
+    assert!(
+      appearance
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("SHX"))
+    );
   }
 
   #[test]

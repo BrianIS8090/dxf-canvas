@@ -3,6 +3,7 @@ use eframe::egui::{self, Color32, FontId, Painter, Pos2, Rect, Stroke, StrokeKin
 use crate::{
   geometry::{DrawingItem, Point, RoundCurve, ViewTransform},
   measurement::{Dimension, DimensionKind, Snap},
+  theme::Palette,
 };
 
 pub fn paint_dimension(
@@ -14,9 +15,9 @@ pub fn paint_dimension(
   preview: bool,
 ) {
   let color = if preview {
-    Color32::from_rgb(23, 137, 111)
+    Palette::get(painter.ctx()).success
   } else {
-    Color32::from_rgb(164, 73, 22)
+    Palette::get(painter.ctx()).dimension
   };
   let stroke = Stroke::new(1.3, color);
   let screen = |point: Point| transform.world_to_screen(item.world_point(point));
@@ -156,7 +157,7 @@ fn paint_label(painter: &Painter, center: Pos2, text: String, font_size: f32, co
   painter.rect_filled(
     Rect::from_min_size(position, galley.size()).expand2(Vec2::new(5.0, 3.0)),
     3.0,
-    Color32::WHITE,
+    Palette::get(painter.ctx()).panel,
   );
   painter.galley(position, galley, color);
 }
@@ -175,7 +176,7 @@ fn center_mark(painter: &Painter, point: Pos2, color: Color32) {
 
 pub fn paint_snap(painter: &Painter, snap: Snap, item: &DrawingItem, transform: ViewTransform) {
   let position = transform.world_to_screen(item.world_point(snap.point));
-  let color = Color32::from_rgb(13, 151, 107);
+  let color = Palette::get(painter.ctx()).success;
   painter.rect_stroke(
     Rect::from_center_size(position, Vec2::splat(10.0)),
     1.0,
@@ -210,7 +211,7 @@ pub fn paint_round_highlight(
     .collect();
   painter.add(egui::Shape::line(
     points,
-    Stroke::new(2.5, Color32::from_rgb(13, 151, 107)),
+    Stroke::new(2.5, Palette::get(painter.ctx()).success),
   ));
 }
 

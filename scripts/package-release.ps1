@@ -19,7 +19,7 @@ try {
   $name = "DXF-Canvas-$version-windows-x64.exe"
   $asset = Join-Path $destination $name
   Copy-Item -LiteralPath $source -Destination $asset -Force
-  $licenseFiles = @('LICENSE', 'THIRD_PARTY_NOTICES.md', 'docs/licenses/ACADSHARP-LICENSE.txt', 'docs/licenses/DOTNET-LICENSE.txt', 'docs/licenses/DOTNET-NATIVE-NOTICES.txt')
+  $licenseFiles = @('LICENSE', 'THIRD_PARTY_NOTICES.md', 'docs/licenses/OPEN-SANS-OFL.txt', 'docs/licenses/ACADSHARP-LICENSE.txt', 'docs/licenses/DOTNET-LICENSE.txt', 'docs/licenses/DOTNET-NATIVE-NOTICES.txt')
   $notices = ($licenseFiles | ForEach-Object { Get-Content -LiteralPath $_ -Raw }) -join "`n`n"
   [System.IO.File]::WriteAllText((Join-Path $destination 'THIRD-PARTY-LICENSES.txt'), $notices, [System.Text.UTF8Encoding]::new($false))
   $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()

@@ -1,6 +1,7 @@
 use crate::{
-  cad_scene::{CadText, EntityStyle, readable_color},
+  cad_scene::{CadText, EntityStyle},
   geometry::{Bounds, DrawingItem, MeasureCurve, Primitive, ViewTransform},
+  theme::Palette,
 };
 use eframe::egui::{self, Color32, Rect, Stroke};
 use std::sync::Arc;
@@ -14,6 +15,7 @@ fn screen_bounds(bounds: Bounds, item: &DrawingItem, view: ViewTransform) -> Rec
 }
 
 pub fn paint(painter: &egui::Painter, item: &DrawingItem, view: ViewTransform) {
+  let palette = Palette::get(painter.ctx());
   let clip = painter.clip_rect();
   for fill in &item.appearance.fills {
     if !item.appearance.visible(&fill.style)
@@ -22,7 +24,7 @@ pub fn paint(painter: &egui::Painter, item: &DrawingItem, view: ViewTransform) {
       continue;
     }
     let mut mesh = egui::Mesh::default();
-    let color = readable_color(fill.style.color);
+    let color = palette.drawing_color(fill.style.color);
     mesh
       .vertices
       .extend(fill.vertices.iter().map(|point| egui::epaint::Vertex {
@@ -80,7 +82,7 @@ pub fn paint(painter: &egui::Painter, item: &DrawingItem, view: ViewTransform) {
     let style = item.appearance.styles.get(index).unwrap_or(&default_style);
     let stroke = Stroke::new(
       (style.line_weight * 2.0).clamp(0.7, 2.5),
-      readable_color(style.color),
+      palette.drawing_color(style.color),
     );
     if let Primitive::Path { points, .. } = primitive
       && points.len() == 2
@@ -253,31 +255,79 @@ fn clip_line(a: egui::Pos2, b: egui::Pos2, rect: Rect) -> Option<(f64, f64)> {
 }
 
 fn paint_text(painter: &egui::Painter, item: &DrawingItem, view: ViewTransform, text: &CadText) {
+  let palette = Palette::get(painter.ctx());
   let scale = item.scale * view.scale as f64;
   let pixel_height = text.height * text.y_axis.x.hypot(text.y_axis.y) * scale;
   if pixel_height < 0.55 {
     return;
   }
-  let base_size = pixel_height.clamp(8.0, 64.0) as f32;
-  let factor = text.height * 1.3 * scale / base_size as f64;
+  // Постоянная база исключает скачки переноса при масштабировании холста.
+  let base_size = 64.0;
+  let family = painter.ctx().fonts(|fonts| {
+    let family = text.font.family();
+    if fonts.definitions().families.contains_key(&family) {
+      family
+    } else {
+      egui::FontFamily::Proportional
+    }
+  });
+  let capital = painter.layout_no_wrap(
+    "H".into(),
+    egui::FontId::new(base_size, family.clone()),
+    Color32::BLACK,
+  );
+  let cap_height = capital
+    .rows
+    .first()
+    .and_then(|row| row.glyphs.first())
+    .map(|glyph| glyph.uv_rect.size.y)
+    .filter(|height| *height > 0.0)
+    .unwrap_or(base_size);
+  let factor = text.height * scale / cap_height as f64;
   let wrap = if text.width > 0.0 {
-    (text.width / (text.height * 1.3) * base_size as f64) as f32
+    (text.width / (text.height * text.width_factor.abs().max(1.0e-6)) * cap_height as f64) as f32
   } else {
     f32::INFINITY
   };
-  let job = crate::cad_text::layout(
+  let mut job = crate::cad_text::layout_with_font(
     &text.text,
     base_size,
-    readable_color(text.style.color),
+    text.style.color,
     wrap,
     text.line_spacing,
     text.height,
+    text.font,
   );
+  painter.ctx().fonts(|fonts| {
+    for section in &mut job.sections {
+      section.format.color = palette.drawing_color(section.format.color);
+      section.format.underline.color = palette.drawing_color(section.format.underline.color);
+      if !fonts
+        .definitions()
+        .families
+        .contains_key(&section.format.font_id.family)
+      {
+        section.format.font_id.family = family.clone();
+      }
+      // В DXF стандартный межстрочный интервал составляет 5/3 высоты букв.
+      section.format.line_height = Some(
+        cap_height * (5.0 / 3.0) * text.line_spacing * section.format.font_id.size / base_size,
+      );
+    }
+  });
   let original = painter.layout_job(job);
-  let anchor = egui::vec2(
-    original.size().x * text.alignment[0] as f32,
-    original.size().y * text.alignment[1] as f32,
-  );
+  let y_anchor = if text.baseline {
+    original
+      .rows
+      .first()
+      .and_then(|row| row.glyphs.first().map(|glyph| row.pos.y + glyph.pos.y))
+      .unwrap_or(0.0)
+  } else if original.mesh_bounds.is_finite() {
+    original.mesh_bounds.min.y + original.mesh_bounds.height() * text.alignment[1] as f32
+  } else {
+    original.size().y * text.alignment[1] as f32
+  };
+  let anchor = egui::vec2(original.size().x * text.alignment[0] as f32, y_anchor);
   let mut galley = (*original).clone();
   let mut bounds = Rect::NOTHING;
   for row in &mut galley.rows {
@@ -351,8 +401,11 @@ pub fn layers_ui(ui: &mut egui::Ui, item: &mut DrawingItem, filter: &mut String)
               ui.horizontal(|ui| {
                 let (rect, _) =
                   ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                ui.painter()
-                  .rect_filled(rect, 1.0, readable_color(layer.color));
+                ui.painter().rect_filled(
+                  rect,
+                  1.0,
+                  Palette::get(ui.ctx()).drawing_color(layer.color),
+                );
                 let checkbox = ui.checkbox(&mut layer.visible, "");
                 let label = ui
                   .add(egui::Label::new(&layer.name).truncate())
@@ -382,6 +435,182 @@ pub fn layers_ui(ui: &mut egui::Ui, item: &mut DrawingItem, filter: &mut String)
 mod tests {
   use super::*;
   use crate::geometry::Point;
+
+  fn rendered_text(source: &str) -> egui::epaint::TextShape {
+    let drawing = dxf::Drawing::load(&mut std::io::Cursor::new(source.as_bytes())).unwrap();
+    let (_, appearance, _) =
+      crate::dxf_scene::extract(&drawing, &crate::raw_dxf::RawDxf::parse(source));
+    let mut item =
+      crate::dxf_import::load_dxf(std::path::Path::new("examples/advanced_demo.dxf")).unwrap();
+    item.appearance = appearance;
+    let context = egui::Context::default();
+    let mut fonts = egui::FontDefinitions::default();
+    crate::cad_text::fonts::install(&mut fonts);
+    context.set_fonts(fonts);
+    let mut output = context.run_ui(Default::default(), |ui| {
+      paint_text(
+        ui.painter(),
+        &item,
+        ViewTransform {
+          scale: 10.0,
+          origin: egui::pos2(200.0, 200.0),
+        },
+        &item.appearance.texts[0],
+      );
+    });
+    output.textures_delta.clear();
+    output
+      .shapes
+      .into_iter()
+      .find_map(|shape| match shape.shape {
+        egui::Shape::Text(text) => Some(text),
+        _ => None,
+      })
+      .unwrap()
+  }
+
+  #[test]
+  fn theme_switch_recolors_cad_and_inline_text_without_mutating_source() {
+    let source = "0\nSECTION\n2\nENTITIES\n0\nLINE\n10\n0\n20\n0\n11\n10\n21\n0\n0\nMTEXT\n5\nAB\n10\n0\n20\n10\n40\n2.5\n1\nBlack{\\C7;White}\\C5;Blue\n0\nENDSEC\n0\nEOF\n";
+    let drawing = dxf::Drawing::load(&mut std::io::Cursor::new(source.as_bytes())).unwrap();
+    let (primitives, appearance, _) =
+      crate::dxf_scene::extract(&drawing, &crate::raw_dxf::RawDxf::parse(source));
+    let mut item =
+      crate::dxf_import::load_dxf(std::path::Path::new("examples/advanced_demo.dxf")).unwrap();
+    item.primitives = primitives;
+    item.appearance = appearance;
+    let before = format!(
+      "{:?}",
+      (
+        &item.primitives,
+        &item.appearance.texts,
+        &item.appearance.styles
+      )
+    );
+    let context = egui::Context::default();
+    crate::theme::configure(&context);
+    for dark in [false, true, false] {
+      crate::theme::apply(&context, dark);
+      let mut output = context.run_ui(Default::default(), |ui| {
+        paint(
+          ui.painter(),
+          &item,
+          ViewTransform {
+            scale: 10.0,
+            origin: egui::pos2(100.0, 200.0),
+          },
+        );
+      });
+      output.textures_delta.clear();
+      let text = output
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+          egui::Shape::Text(text) => Some(text),
+          _ => None,
+        })
+        .unwrap();
+      assert_eq!(text.galley.rows.len(), 1);
+      assert_eq!(text.galley.job.sections.len(), 2);
+      for (index, section) in text.galley.job.sections.iter().enumerate() {
+        let source_color = if index == 1 {
+          Color32::BLUE
+        } else {
+          crate::cad_scene::EntityStyle::default().color
+        };
+        assert_eq!(
+          section.format.color,
+          Palette::new(dark).drawing_color(source_color)
+        );
+      }
+      assert_eq!(
+        before,
+        format!(
+          "{:?}",
+          (
+            &item.primitives,
+            &item.appearance.texts,
+            &item.appearance.styles
+          )
+        )
+      );
+    }
+  }
+
+  #[test]
+  fn cad_cap_height_matches_dxf_height_and_text_keeps_baseline() {
+    for style in ["Arial", "OpenSansCondensed-Light"] {
+      let source = format!(
+        "0\nSECTION\n2\nENTITIES\n0\nTEXT\n10\n0\n20\n0\n40\n2.5\n7\n{style}\n1\nH\n0\nENDSEC\n0\nEOF\n"
+      );
+      let text = rendered_text(&source);
+      let bounds = text.galley.mesh_bounds;
+      assert!(
+        (bounds.height() - 25.0).abs() < 0.5,
+        "Высота {style}: {}",
+        bounds.height()
+      );
+      assert!(
+        bounds.max.y.abs() < 0.5,
+        "Базовая линия {style}: {}",
+        bounds.max.y
+      );
+    }
+  }
+
+  #[test]
+  fn mtext_preserves_explicit_paragraphs_and_positive_width_wrapping() {
+    for (content, width) in [("FIRST\\PSECOND", ""), ("FIRST SECOND THIRD", "41\n12\n")] {
+      let source = format!(
+        "0\nSECTION\n2\nENTITIES\n0\nMTEXT\n5\nAB\n40\n2.5\n{width}1\n{content}\n0\nENDSEC\n0\nEOF\n"
+      );
+      assert!(rendered_text(&source).galley.rows.len() >= 2);
+    }
+  }
+
+  #[test]
+  fn dimension_mtext_without_width_renders_one_row_at_any_angle() {
+    for (label, angle) in [
+      ("36", 0),
+      ("36", 90),
+      ("%%c60", 45),
+      ("%%c3.3", 45),
+      ("1", 90),
+      ("11.5", 90),
+    ] {
+      let source = format!(
+        "0\nSECTION\n2\nENTITIES\n0\nMTEXT\n5\nAB\n40\n2.5\n50\n{angle}\n71\n5\n1\n{label}\n0\nENDSEC\n0\nEOF\n"
+      );
+      let drawing = dxf::Drawing::load(&mut std::io::Cursor::new(source.as_bytes())).unwrap();
+      let (_, appearance, _) =
+        crate::dxf_scene::extract(&drawing, &crate::raw_dxf::RawDxf::parse(&source));
+      let mut item =
+        crate::dxf_import::load_dxf(std::path::Path::new("examples/advanced_demo.dxf")).unwrap();
+      item.appearance = appearance;
+      let context = egui::Context::default();
+      let mut output = context.run_ui(Default::default(), |ui| {
+        paint_text(
+          ui.painter(),
+          &item,
+          ViewTransform {
+            scale: 10.0,
+            origin: egui::pos2(200.0, 200.0),
+          },
+          &item.appearance.texts[0],
+        );
+      });
+      output.textures_delta.clear();
+      let galley = output
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+          egui::Shape::Text(text) => Some(&text.galley),
+          _ => None,
+        })
+        .unwrap();
+      assert_eq!(galley.rows.len(), 1, "Надпись {label}, угол {angle}");
+    }
+  }
 
   #[test]
   fn rotated_bounds_include_all_corners_not_only_the_diagonal() {

@@ -31,6 +31,7 @@ mod region;
 mod spatial;
 #[cfg(test)]
 mod test_fixtures;
+mod theme;
 
 use app::DxfCanvasApp;
 use eframe::egui;

@@ -38,7 +38,7 @@ cargo build --locked --release
 Откройте PowerShell в папке скачанного файла:
 
 ```powershell
-Get-FileHash -LiteralPath './DXF-Canvas-0.8.0-windows-x64.exe' -Algorithm SHA256
+Get-FileHash -LiteralPath './DXF-Canvas-0.9.5-windows-x64.exe' -Algorithm SHA256
 ```
 
 Сравните значение `Hash` с записью из `SHA256SUMS.txt` того же релиза. Контрольная сумма помогает проверить целостность файла, но не заменяет цифровую подпись.

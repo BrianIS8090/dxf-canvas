@@ -91,3 +91,5 @@ mod dxf_scene;
 mod hatch;
 #[path = "../src/raw_dxf.rs"]
 mod raw_dxf;
+#[path = "../src/theme.rs"]
+mod theme;

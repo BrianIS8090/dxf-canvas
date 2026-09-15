@@ -1,5 +1,8 @@
-use crate::cad_scene::{indexed_color, readable_color};
+use crate::cad_scene::indexed_color;
 use eframe::egui::{Color32, FontId, TextFormat, text::LayoutJob};
+
+#[path = "cad_fonts.rs"]
+pub mod fonts;
 
 #[derive(Clone, Debug)]
 struct Format {
@@ -7,6 +10,7 @@ struct Format {
   color: Color32,
   underline: bool,
   italic: bool,
+  font: fonts::CadFont,
 }
 
 pub fn plain(source: &str) -> String {
@@ -20,6 +24,27 @@ pub fn layout(
   wrap: f32,
   spacing: f32,
   source_height: f64,
+) -> LayoutJob {
+  layout_with_font(
+    source,
+    size,
+    color,
+    wrap,
+    spacing,
+    source_height,
+    Default::default(),
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn layout_with_font(
+  source: &str,
+  size: f32,
+  color: Color32,
+  wrap: f32,
+  spacing: f32,
+  source_height: f64,
+  font: fonts::CadFont,
 ) -> LayoutJob {
   let source = source
     .replace("%%d", "°")
@@ -36,6 +61,7 @@ pub fn layout(
     color,
     underline: false,
     italic: false,
+    font,
   };
   let mut stack = Vec::new();
   let mut buffer = String::new();
@@ -44,8 +70,8 @@ pub fn layout(
       return;
     }
     let mut text_format = TextFormat {
-      font_id: FontId::proportional(size * format.scale),
-      color: readable_color(format.color),
+      font_id: FontId::new(size * format.scale, format.font.family()),
+      color: format.color,
       italics: format.italic,
       line_height: Some(size * format.scale * 1.3 * spacing),
       ..Default::default()
@@ -122,6 +148,10 @@ pub fn layout(
               }
               'F' | 'f' => {
                 format.italic = value.contains("|i1");
+                if let Some(font) = fonts::CadFont::from_name(value.split('|').next().unwrap_or(""))
+                {
+                  format.font = font;
+                }
               }
               'S' => {
                 buffer.push_str(&value.replace(['#', '^'], "/"));
@@ -150,6 +180,31 @@ mod tests {
     assert_eq!(
       plain("{\\fArial|b0|i0;Потолок\\P\\C1;Ø12 \\S1/2; \\U+00B0} %%p"),
       "Потолок\nØ12 1/2 ° ±"
+    );
+  }
+
+  #[test]
+  fn inline_font_selection_is_restored_after_a_group() {
+    let job = layout(
+      "A{\\fOpenSansCondensed-Light;B}C",
+      12.0,
+      Color32::BLACK,
+      f32::INFINITY,
+      1.0,
+      2.5,
+    );
+    let families: Vec<_> = job
+      .sections
+      .iter()
+      .map(|section| section.format.font_id.family.clone())
+      .collect();
+    assert_eq!(
+      families,
+      vec![
+        fonts::CadFont::Sans.family(),
+        fonts::CadFont::CondensedLight.family(),
+        fonts::CadFont::Sans.family()
+      ]
     );
   }
 

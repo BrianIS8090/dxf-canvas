@@ -1,9 +1,5 @@
 use super::*;
 
-const ACCENT: Color32 = Color32::from_rgb(30, 94, 168);
-const MUTED: Color32 = Color32::from_rgb(92, 105, 121);
-const BORDER: Color32 = Color32::from_rgb(218, 224, 231);
-
 #[derive(Clone, Copy, Default, PartialEq)]
 enum InspectorTab {
   #[default]
@@ -67,6 +63,51 @@ mod tests {
           },
         ],
       );
+    }
+  }
+
+  #[test]
+  fn theme_button_preserves_workspace_and_works_in_a_narrow_window() {
+    for width in [760.0, 1280.0] {
+      let mut app = super::super::tests::focus_test_app();
+      app.measurements.set_tool(Tool::Region);
+      app.items[1].rotation = crate::geometry::Rotation::new(0.7);
+      let label_font_size = app.label_font_size;
+      let placement = format!(
+        "{:?}",
+        (
+          app.items[1].offset,
+          app.items[1].rotation,
+          app.items[1].scale,
+          app.view_center,
+          app.zoom
+        )
+      );
+      let context = egui::Context::default();
+      configure_fonts_and_style(&context);
+      for (label, dark) in [("Тёмная тема", true), ("Светлая тема", false)] {
+        click_label(&mut app, &context, width, label);
+        assert_eq!(Palette::get(&context).dark, dark);
+        assert!(app.workspace.theme_dirty);
+        assert_eq!(app.measurements.tool, Tool::Region);
+        assert_eq!(app.measurements.completed.len(), 1);
+        assert_eq!(app.label_font_size, label_font_size);
+        assert_eq!(
+          format!(
+            "{:?}",
+            (
+              app.items[1].offset,
+              app.items[1].rotation,
+              app.items[1].scale,
+              app.view_center,
+              app.zoom
+            )
+          ),
+          placement
+        );
+        let output = frame(&mut app, &context, width, vec![]);
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == Palette::new(dark).panel)));
+      }
     }
   }
 
@@ -319,6 +360,7 @@ pub(super) struct WorkspaceUi {
   clear_target: Option<ClearTarget>,
   inspector_visible: bool,
   focus_bounds: Option<Bounds>,
+  pub(super) theme_dirty: bool,
 }
 
 impl Default for WorkspaceUi {
@@ -330,6 +372,7 @@ impl Default for WorkspaceUi {
       clear_target: None,
       inspector_visible: true,
       focus_bounds: None,
+      theme_dirty: false,
     }
   }
 }
@@ -349,15 +392,16 @@ impl DxfCanvasApp {
 
   pub(super) fn show_toolbar(&mut self, root: &mut egui::Ui) {
     egui::Panel::top("toolbar")
-      .frame(egui::Frame::new().fill(Color32::WHITE).inner_margin(10.0))
+      .frame(egui::Frame::new().fill(Palette::get(root.ctx()).panel).inner_margin(10.0))
       .show(root, |ui| {
         ui.horizontal_wrapped(|ui| {
-          ui.heading(RichText::new("DXF Холст").size(20.0).color(ACCENT));
+          ui.heading(RichText::new("DXF Холст").size(20.0).color(Palette::get(ui.ctx()).accent));
           ui.menu_button(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).small(), |ui| {
             ui.set_max_width(450.0);
             egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
               ui.label(include_str!("../../THIRD_PARTY_NOTICES.md"));
               ui.collapsing("Лицензия приложения", |ui| { ui.label(include_str!("../../LICENSE")); });
+              ui.collapsing("Open Sans / Open Sans Condensed — OFL 1.1", |ui| { ui.label(include_str!("../../docs/licenses/OPEN-SANS-OFL.txt")); });
               ui.collapsing("ACadSharp / CSUtilities", |ui| { ui.label(include_str!("../../docs/licenses/ACADSHARP-LICENSE.txt")); });
               ui.collapsing(".NET NativeAOT", |ui| {
                 ui.label(include_str!("../../docs/licenses/DOTNET-LICENSE.txt"));
@@ -366,7 +410,7 @@ impl DxfCanvasApp {
             });
           });
           ui.separator();
-          if ui.add(egui::Button::new(RichText::new("Добавить DWG / DXF").color(Color32::WHITE)).fill(ACCENT))
+          if ui.add(egui::Button::new(RichText::new("Добавить DWG / DXF").color(Color32::WHITE)).fill(Color32::from_rgb(30, 94, 168)))
             .on_hover_text("Выбрать один или несколько файлов · Ctrl+O\nТакже можно перетащить файлы в окно. Новые файлы появятся справа от существующих; «Вписать всё» покажет их без перестановки.").clicked() {
             self.choose_files();
           }
@@ -397,6 +441,12 @@ impl DxfCanvasApp {
           }
           if ui.button("Справка · F1").clicked() {
             self.workspace.help_open = true;
+          }
+          let dark = Palette::get(ui.ctx()).dark;
+          if ui.button(if dark { "Светлая тема" } else { "Тёмная тема" })
+            .on_hover_text("Переключить оформление интерфейса и холста. Выбор сохраняется между запусками.").clicked() {
+            crate::theme::apply(ui.ctx(), !dark);
+            self.workspace.theme_dirty = true;
           }
         });
         ui.add_space(6.0);
@@ -433,13 +483,13 @@ impl DxfCanvasApp {
         });
         if self.measurements.tool == Tool::Region {
           ui.add_space(5.0);
-          egui::Frame::new().fill(Color32::from_rgb(240, 245, 251)).corner_radius(5.0).inner_margin(8.0).show(ui, |ui| {
+          egui::Frame::new().fill(Palette::get(ui.ctx()).card).corner_radius(5.0).inner_margin(8.0).show(ui, |ui| {
             region_mode_controls(ui, &mut self.measurements);
             ui.label(RichText::new(if self.measurements.contour_only {
               "Для планов: один замкнутый контур под курсором. Отверстия внутри не вычитаются."
             } else {
               "Для деталей: площадь за вычетом отверстий. Периметр включает отверстия и прорези."
-            }).small().color(MUTED));
+            }).small().color(Palette::get(ui.ctx()).muted));
           });
         }
       });
@@ -453,14 +503,18 @@ impl DxfCanvasApp {
       .default_size(320.0)
       .min_size(280.0)
       .max_size(460.0)
-      .frame(egui::Frame::new().fill(Color32::WHITE).inner_margin(12.0))
+      .frame(
+        egui::Frame::new()
+          .fill(Palette::get(root.ctx()).panel)
+          .inner_margin(12.0),
+      )
       .show(root, |ui| {
         ui.horizontal_wrapped(|ui| {
           ui.heading("Рабочая область");
           ui.label(
             RichText::new(format!("{} файлов", self.items.len()))
               .small()
-              .color(MUTED),
+              .color(Palette::get(ui.ctx()).muted),
           );
         });
         ui.add_space(8.0);
@@ -493,7 +547,7 @@ impl DxfCanvasApp {
     ui.label(
       RichText::new("Выберите файл; двойной щелчок — приблизить")
         .small()
-        .color(MUTED),
+        .color(Palette::get(ui.ctx()).muted),
     );
     ui.add_space(6.0);
     let query = self.workspace.file_filter.trim().to_lowercase();
@@ -512,11 +566,18 @@ impl DxfCanvasApp {
           let selected = self.selected_item == Some(index);
           egui::Frame::new()
             .fill(if selected {
-              Color32::from_rgb(238, 245, 253)
+              Palette::get(ui.ctx()).selected
             } else {
-              Color32::from_rgb(248, 250, 252)
+              Palette::get(ui.ctx()).card
             })
-            .stroke(Stroke::new(1.0, if selected { ACCENT } else { BORDER }))
+            .stroke(Stroke::new(
+              1.0,
+              if selected {
+                Palette::get(ui.ctx()).accent
+              } else {
+                Palette::get(ui.ctx()).border
+              },
+            ))
             .corner_radius(6.0)
             .inner_margin(10.0)
             .show(ui, |ui| {
@@ -566,7 +627,7 @@ impl DxfCanvasApp {
                   item.units.label()
                 ))
                 .small()
-                .color(MUTED),
+                .color(Palette::get(ui.ctx()).muted),
               );
               ui.label(
                 RichText::new(format!(
@@ -575,11 +636,11 @@ impl DxfCanvasApp {
                   item.appearance.layers.len()
                 ))
                 .small()
-                .color(MUTED),
+                .color(Palette::get(ui.ctx()).muted),
               );
               if item.unsupported_entities > 0 {
                 ui.colored_label(
-                  Color32::from_rgb(155, 88, 13),
+                  Palette::get(ui.ctx()).warning,
                   format!("Не показано сущностей: {}", item.unsupported_entities),
                 );
               }
@@ -625,14 +686,14 @@ impl DxfCanvasApp {
                 ui.label(
                   RichText::new("Исходные размеры не меняются")
                     .small()
-                    .color(MUTED),
+                    .color(Palette::get(ui.ctx()).muted),
                 );
                 if !item.appearance.warnings.is_empty() {
                   ui.collapsing(
                     format!("Импорт: {} предупреждений", item.appearance.warnings.len()),
                     |ui| {
                       for warning in &item.appearance.warnings {
-                        ui.colored_label(Color32::from_rgb(155, 88, 13), warning);
+                        ui.colored_label(Palette::get(ui.ctx()).warning, warning);
                       }
                     },
                   );
@@ -695,12 +756,12 @@ impl DxfCanvasApp {
     ui.label(
       RichText::new("Видимость слоёв выбранного файла")
         .small()
-        .color(MUTED),
+        .color(Palette::get(ui.ctx()).muted),
     );
     ui.label(
       RichText::new("Скрытые слои не участвуют в новых измерениях и проверке.")
         .small()
-        .color(MUTED),
+        .color(Palette::get(ui.ctx()).muted),
     );
     ui.add_space(8.0);
     if crate::cad_render::layers_ui(ui, &mut self.items[index], &mut self.layer_filter) {
@@ -727,7 +788,7 @@ impl DxfCanvasApp {
       ui.label(
         RichText::new("Исходные DWG и DXF не изменяются.")
           .small()
-          .color(MUTED),
+          .color(Palette::get(ui.ctx()).muted),
       );
       return;
     }
@@ -783,7 +844,11 @@ impl DxfCanvasApp {
 
   pub(super) fn show_status(&mut self, root: &mut egui::Ui) {
     egui::Panel::bottom("workspace_status")
-      .frame(egui::Frame::new().fill(Color32::WHITE).inner_margin(8.0))
+      .frame(
+        egui::Frame::new()
+          .fill(Palette::get(root.ctx()).panel)
+          .inner_margin(8.0),
+      )
       .show(root, |ui| {
         ui.horizontal_wrapped(|ui| {
           if !self.items.is_empty()
@@ -801,9 +866,9 @@ impl DxfCanvasApp {
                 .unwrap_or(self.measurements.hint()),
             )
             .color(if self.measurements.notice.is_some() {
-              Color32::from_rgb(156, 80, 13)
+              Palette::get(ui.ctx()).warning
             } else {
-              MUTED
+              Palette::get(ui.ctx()).muted
             }),
           );
         });
@@ -833,7 +898,7 @@ impl DxfCanvasApp {
         ui.label("Отдельный контур: выбирает один замкнутый объект под курсором без вычитания вложенных отверстий. Подходит для элементов на архитектурном плане.");
         ui.label("Щёлкните внутри области, затем разместите подпись. Площадь — в м², периметр — в м, если единицы файла известны.");
         ui.separator();
-        ui.label(RichText::new("Масштаб на холсте не изменяет исходную геометрию и результаты измерений. Скрытые слои исключены из новых измерений и проверки.").color(ACCENT));
+        ui.label(RichText::new("Масштаб на холсте не изменяет исходную геометрию и результаты измерений. Скрытые слои исключены из новых измерений и проверки.").color(Palette::get(ui.ctx()).accent));
       });
     });
     if let Some(target) = self.workspace.clear_target {

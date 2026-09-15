@@ -50,6 +50,8 @@ pub struct CadText {
   pub width_factor: f64,
   pub alignment: [f64; 2],
   pub line_spacing: f32,
+  pub font: crate::cad_text::fonts::CadFont,
+  pub baseline: bool,
   pub style: EntityStyle,
   pub bounds: Bounds,
 }
@@ -146,13 +148,4 @@ pub fn indexed_color(index: u8) -> Color32 {
     }
   };
   Color32::from_rgb(rgb[0], rgb[1], rgb[2])
-}
-
-pub fn readable_color(color: Color32) -> Color32 {
-  // Белый цвет CAD должен оставаться видимым на светлом холсте.
-  if color.r() > 235 && color.g() > 235 && color.b() > 235 {
-    Color32::from_rgba_unmultiplied(31, 37, 46, color.a())
-  } else {
-    color
-  }
 }

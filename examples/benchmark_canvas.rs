@@ -27,6 +27,8 @@ mod raw_dxf;
 mod region;
 #[path = "../src/spatial.rs"]
 mod spatial;
+#[path = "../src/theme.rs"]
+mod theme;
 
 use eframe::egui;
 use std::time::Instant;

@@ -13,6 +13,7 @@ use crate::{
   loading::{ImportQueue, is_supported_drawing, show_loading},
   measurement::{MeasurementState, Tool},
   measurement_ui::{paint_dimension, paint_round_highlight, paint_snap},
+  theme::Palette,
 };
 
 const CANVAS_PADDING: f32 = 54.0;
@@ -94,6 +95,7 @@ pub struct DxfCanvasApp {
 impl DxfCanvasApp {
   pub fn new(context: &eframe::CreationContext<'_>) -> Self {
     configure_fonts_and_style(&context.egui_ctx);
+    crate::theme::apply(&context.egui_ctx, crate::theme::load_preference());
     let mut app = Self {
       items: Vec::new(),
       errors: Vec::new(),
@@ -464,7 +466,7 @@ impl DxfCanvasApp {
     let available = ui.available_size();
     let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
     let rect = response.rect;
-    painter.rect_filled(rect, 0.0, Color32::from_rgb(239, 241, 244));
+    painter.rect_filled(rect, 0.0, Palette::get(painter.ctx()).canvas);
 
     if self.needs_layout {
       self.perform_layout(rect);
@@ -570,7 +572,7 @@ impl DxfCanvasApp {
       painter.rect_stroke(
         rect.shrink(12.0),
         10.0,
-        Stroke::new(2.0, Color32::from_rgb(30, 92, 170)),
+        Stroke::new(2.0, Palette::get(painter.ctx()).accent),
         StrokeKind::Inside,
       );
       painter.text(
@@ -578,7 +580,7 @@ impl DxfCanvasApp {
         Align2::CENTER_CENTER,
         "Отпустите DWG- или DXF-файлы здесь",
         FontId::proportional(24.0),
-        Color32::from_rgb(24, 71, 132),
+        Palette::get(painter.ctx()).accent,
       );
     }
   }
@@ -704,6 +706,13 @@ impl eframe::App for DxfCanvasApp {
     }
 
     self.show_toolbar(root_ui);
+    if std::mem::take(&mut self.workspace.theme_dirty)
+      && let Err(error) = crate::theme::save_preference(Palette::get(&context).dark)
+    {
+      self.errors.push(format!(
+        "Тема переключена, но не удалось сохранить настройку: {error}"
+      ));
+    }
     self.show_inspector(root_ui);
     self.show_status(root_ui);
 
@@ -713,7 +722,7 @@ impl eframe::App for DxfCanvasApp {
         .default_size(42.0)
         .show(root_ui, |ui| {
           ui.horizontal(|ui| {
-            ui.colored_label(Color32::from_rgb(175, 45, 45), "Сообщения об ошибках:");
+            ui.colored_label(ui.visuals().error_fg_color, "Сообщения об ошибках:");
             if ui.small_button("Скрыть").clicked() {
               self.errors.clear();
             }
@@ -764,7 +773,7 @@ fn draw_item(
   let galley = painter.layout(
     item.name.clone(),
     FontId::new(font_size, FontFamily::Proportional),
-    Color32::from_rgb(24, 28, 34),
+    Palette::get(painter.ctx()).text,
     (canvas_rect.width() - 22.0).max(1.0),
   );
   let min_label_x = canvas_rect.left() + 6.0;
@@ -772,36 +781,32 @@ fn draw_item(
   let label_x = screen_left.x.clamp(min_label_x, max_label_x);
   let label_pos = egui::pos2(label_x, screen_left.y - galley.size().y - 9.0);
   let background = Rect::from_min_size(label_pos, galley.size()).expand2(Vec2::new(5.0, 3.0));
-  painter.rect_filled(
-    background,
-    3.0,
-    Color32::from_rgba_unmultiplied(255, 255, 255, 235),
-  );
-  painter.galley(label_pos, galley, Color32::from_rgb(24, 28, 34));
+  painter.rect_filled(background, 3.0, Palette::get(painter.ctx()).panel);
+  painter.galley(label_pos, galley, Palette::get(painter.ctx()).text);
 
   if selected {
     let handles = selection_handles(item, transform);
     painter.add(egui::Shape::closed_line(
       vec![handles[0].1, handles[1].1, handles[3].1, handles[2].1],
-      Stroke::new(1.3, Color32::from_rgb(37, 105, 193)),
+      Stroke::new(1.3, Palette::get(painter.ctx()).accent),
     ));
     for (_, position) in handles {
       let handle = Rect::from_center_size(position, Vec2::splat(RESIZE_HANDLE_SIZE));
-      painter.rect_filled(handle, 1.0, Color32::WHITE);
+      painter.rect_filled(handle, 1.0, Palette::get(painter.ctx()).panel);
       painter.rect_stroke(
         handle,
         1.0,
-        Stroke::new(1.5, Color32::from_rgb(37, 105, 193)),
+        Stroke::new(1.5, Palette::get(painter.ctx()).accent),
         StrokeKind::Inside,
       );
     }
     let (anchor, knob) = rotation_handle(item, transform);
-    let color = Color32::from_rgb(37, 105, 193);
+    let color = Palette::get(painter.ctx()).accent;
     painter.line_segment([anchor, knob], Stroke::new(1.3, color));
     painter.circle(
       knob,
       ROTATION_HANDLE_RADIUS,
-      Color32::WHITE,
+      Palette::get(painter.ctx()).panel,
       Stroke::new(1.8, color),
     );
     painter.text(
@@ -823,7 +828,7 @@ fn draw_item(
     painter.rect_filled(
       Rect::from_min_size(pos, galley.size()).expand(3.0),
       3.0,
-      Color32::WHITE,
+      Palette::get(painter.ctx()).panel,
     );
     painter.galley(pos, galley, color);
   }
@@ -939,21 +944,21 @@ fn draw_empty_state(painter: &egui::Painter, rect: Rect) {
     Align2::CENTER_CENTER,
     "Перетащите сюда DWG- или DXF-файлы",
     FontId::proportional(25.0),
-    Color32::from_rgb(58, 67, 79),
+    Palette::get(painter.ctx()).text,
   );
   painter.text(
     center + Vec2::new(0.0, 3.0),
     Align2::CENTER_CENTER,
     "Чертежи, слои, измерения и проверка геометрии",
     FontId::proportional(16.0),
-    Color32::from_rgb(111, 120, 132),
+    Palette::get(painter.ctx()).muted,
   );
   painter.text(
     center + Vec2::new(0.0, 36.0),
     Align2::CENTER_CENTER,
     "Исходные файлы остаются без изменений",
     FontId::proportional(13.0),
-    Color32::from_rgb(135, 143, 153),
+    Palette::get(painter.ctx()).muted,
   );
 }
 
@@ -976,33 +981,10 @@ fn configure_fonts_and_style(context: &egui::Context) {
         .insert(0, "system-cyrillic".to_owned());
     }
   }
+  crate::cad_text::fonts::install(&mut fonts);
   context.set_fonts(fonts);
 
-  let mut style = (*context.style_of(egui::Theme::Light)).clone();
-  style
-    .text_styles
-    .insert(egui::TextStyle::Body, FontId::proportional(14.0));
-  style
-    .text_styles
-    .insert(egui::TextStyle::Button, FontId::proportional(14.0));
-  style
-    .text_styles
-    .insert(egui::TextStyle::Small, FontId::proportional(12.0));
-  style
-    .text_styles
-    .insert(egui::TextStyle::Heading, FontId::proportional(18.0));
-  style.spacing.button_padding = Vec2::new(10.0, 6.0);
-  style.spacing.item_spacing = Vec2::new(6.0, 6.0);
-  style.visuals = egui::Visuals::light();
-  style.visuals.override_text_color = Some(Color32::from_rgb(37, 48, 63));
-  style.visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(245, 247, 250);
-  style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(222, 228, 235));
-  style.visuals.selection.bg_fill = Color32::from_rgb(220, 235, 252);
-  style.visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(23, 75, 135));
-  style.visuals.widgets.active.bg_fill = Color32::from_rgb(210, 229, 249);
-  style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(224, 233, 245);
-  context.set_style_of(egui::Theme::Light, style);
-  context.set_theme(egui::ThemePreference::Light);
+  crate::theme::configure(context);
 }
 
 #[cfg(test)]

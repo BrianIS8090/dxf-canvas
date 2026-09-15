@@ -96,6 +96,7 @@ pub struct RawDxf {
   pub layers: HashMap<String, Record>,
   pub extras: HashMap<String, Vec<Record>>,
   pub entity_overrides: HashMap<u64, Record>,
+  pub mtexts: HashMap<String, Vec<Record>>,
   pub counts: BTreeMap<String, usize>,
   pub binary: bool,
 }
@@ -135,7 +136,7 @@ impl RawDxf {
         );
         if retain_all
           || matches!(code, 5 | 62 | 70 | 420 | 440)
-          || (record.kind == "MTEXT" && matches!(code, 11 | 21 | 31 | 50))
+          || (record.kind == "MTEXT" && matches!(code, 11 | 21 | 31 | 41 | 50))
         {
           record.pairs.push((code, value.trim_end().to_owned()));
         }
@@ -176,6 +177,13 @@ impl RawDxf {
         return;
       }
       *self.counts.entry(record.kind.clone()).or_default() += 1;
+      if record.kind == "MTEXT" {
+        self
+          .mtexts
+          .entry(block.clone())
+          .or_default()
+          .push(record.clone());
+      }
       if matches!(record.kind.as_str(), "HATCH" | "ARC_DIMENSION") {
         self
           .extras

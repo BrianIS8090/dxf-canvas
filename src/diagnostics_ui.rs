@@ -3,13 +3,14 @@ use eframe::egui::{self, Color32, Painter, Rect, RichText, Stroke, StrokeKind, V
 use crate::{
   diagnostics::{DiagnosticReport, DiagnosticsState, Finding, IssueKind, Marker},
   geometry::{DrawingItem, MeasureCurve, Point, Primitive, ViewTransform},
+  theme::Palette,
 };
 
 const MAX_OVERLAY_MARKERS: usize = 1500;
 const MAX_OVERLAY_COST: usize = 100_000;
 
-fn color(kind: IssueKind) -> Color32 {
-  match kind {
+fn color(context: &egui::Context, kind: IssueKind) -> Color32 {
+  Palette::get(context).drawing_color(match kind {
     IssueKind::OpenContour => Color32::from_rgb(207, 43, 52),
     IssueKind::UnjoinedContour => Color32::from_rgb(0, 132, 119),
     IssueKind::Duplicate => Color32::from_rgb(189, 35, 137),
@@ -19,7 +20,7 @@ fn color(kind: IssueKind) -> Color32 {
     IssueKind::IncompleteGeometry => Color32::from_rgb(55, 109, 145),
     IssueKind::Intersection => Color32::from_rgb(215, 48, 20),
     IssueKind::PartialOverlap => Color32::from_rgb(174, 42, 170),
-  }
+  })
 }
 
 pub fn show_legend(ui: &mut egui::Ui, state: &mut DiagnosticsState) {
@@ -57,7 +58,7 @@ pub fn show_legend(ui: &mut egui::Ui, state: &mut DiagnosticsState) {
   let total: usize = reports.iter().map(|report| report.findings.len()).sum();
   if total == 0 {
     ui.colored_label(
-      Color32::from_rgb(27, 121, 83),
+      Palette::get(ui.ctx()).success,
       "По этим проверкам замечаний нет",
     );
   } else {
@@ -71,7 +72,7 @@ pub fn show_legend(ui: &mut egui::Ui, state: &mut DiagnosticsState) {
     }
     ui.horizontal(|ui| {
       let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-      ui.painter().rect_filled(rect, 2.0, color(kind));
+      ui.painter().rect_filled(rect, 2.0, color(ui.ctx(), kind));
       ui.label(format!("{}: {count}", kind.label()))
         .on_hover_text(kind.explanation());
     });
@@ -100,7 +101,7 @@ pub fn show_file_report(
     ui.label(
       RichText::new("По проверке замечаний нет")
         .small()
-        .color(Color32::from_rgb(27, 121, 83)),
+        .color(Palette::get(ui.ctx()).success),
     );
     return None;
   }
@@ -177,7 +178,7 @@ fn finding_button(
         finding.detail
       ))
       .small()
-      .color(color(finding.kind)),
+      .color(color(ui.ctx(), finding.kind)),
     )
     .wrap()
     .selected(selected)
@@ -217,7 +218,7 @@ pub fn paint_report(
     painter.rect_stroke(
       rect,
       4.0,
-      Stroke::new(1.6, color(kind)),
+      Stroke::new(1.6, color(painter.ctx(), kind)),
       StrokeKind::Outside,
     );
   }
@@ -261,7 +262,7 @@ pub fn paint_report(
       break;
     }
     painted += 1;
-    let stroke = Stroke::new(2.6, color(finding.kind));
+    let stroke = Stroke::new(2.6, color(painter.ctx(), finding.kind));
     let marker_cost = marker_cost(item, &finding.marker);
     if marker_cost > MAX_OVERLAY_COST - cost {
       // Ограничивается только подсветка; полный отчёт и исходная геометрия сохраняются.
@@ -323,7 +324,7 @@ fn paint_marker(
     Marker::File => {}
     Marker::Point(point) => {
       let p = screen(point);
-      painter.circle(p, 7.0, Color32::from_white_alpha(230), stroke);
+      painter.circle(p, 7.0, Palette::get(painter.ctx()).panel, stroke);
       painter.line_segment([p - Vec2::new(3.0, 3.0), p + Vec2::new(3.0, 3.0)], stroke);
       painter.line_segment([p - Vec2::new(3.0, -3.0), p + Vec2::new(3.0, -3.0)], stroke);
     }
@@ -394,15 +395,15 @@ pub fn paint_selected_finding(
   };
   let screen = |point| transform.world_to_screen(item.world_point(point));
   let region = transformed_marker_rect(item, transform, bounds);
-  let selected_color = color(finding.kind);
-  // Белый ореол отделяет активное замечание от соседних цветных предупреждений.
+  let selected_color = color(painter.ctx(), finding.kind);
+  // Контрастный ореол отделяет активное замечание от соседних цветных предупреждений.
   if marker_cost(item, &finding.marker) <= MAX_OVERLAY_COST {
     paint_marker(
       painter,
       item,
       &finding.marker,
       &screen,
-      Stroke::new(8.0, Color32::WHITE),
+      Stroke::new(8.0, Palette::get(painter.ctx()).panel),
       finding.kind == IssueKind::ShortSegment,
     );
     paint_marker(
@@ -424,7 +425,7 @@ pub fn paint_selected_finding(
     (frame.right_bottom(), -1.0, -1.0),
   ] {
     for stroke in [
-      Stroke::new(6.0, Color32::WHITE),
+      Stroke::new(6.0, Palette::get(painter.ctx()).panel),
       Stroke::new(2.5, selected_color),
     ] {
       painter.line_segment([corner, corner + Vec2::new(dx * bracket, 0.0)], stroke);
@@ -441,7 +442,7 @@ pub fn paint_selected_finding(
   painter.rect_filled(
     Rect::from_min_size(position, label.size()).expand(6.0),
     4.0,
-    Color32::from_white_alpha(245),
+    Palette::get(painter.ctx()).panel,
   );
   painter.galley(position, label, selected_color);
 }

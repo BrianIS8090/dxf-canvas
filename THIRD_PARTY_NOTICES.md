@@ -14,6 +14,7 @@ DXF Холст — сторонние компоненты
 - windows-sys — MIT OR Apache-2.0, управление дочерним процессом Windows.
 - ACadSharp / включённая CSUtilities — MIT, чтение DWG и запись DXF.
 - .NET NativeAOT — MIT и уведомления о сторонних компонентах из пакета компилятора.
+- Open Sans Regular / Condensed Light — SIL Open Font License 1.1, встроенные шрифты CAD-текста. Copyright 2020 The Open Sans Project Authors. Исходные, неизменённые TTF из https://github.com/googlefonts/opensans/tree/bd7e37632246368c60fdcbd374dbf9bad11969b6/fonts/ttf; лицензия: docs/licenses/OPEN-SANS-OFL.txt, также доступна в меню версии и комплекте EXE.
 
 Полные уведомления для DWG-компонента находятся в docs/licenses/ACADSHARP-LICENSE.txt, DOTNET-LICENSE.txt и DOTNET-NATIVE-NOTICES.txt. Они также встроены в меню версии программы. LibreDWG и коммерческие CAD-конвертеры не используются.
 
