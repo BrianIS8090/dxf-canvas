@@ -85,14 +85,14 @@ pub fn configure(context: &egui::Context) {
     let mut style = (*context.style_of(theme)).clone();
     for (kind, size) in [
       (egui::TextStyle::Body, 14.0),
-      (egui::TextStyle::Button, 14.0),
+      (egui::TextStyle::Button, 13.0),
       (egui::TextStyle::Small, 12.0),
       (egui::TextStyle::Heading, 18.0),
     ] {
       style.text_styles.insert(kind, FontId::proportional(size));
     }
-    style.spacing.button_padding = egui::vec2(10.0, 6.0);
-    style.spacing.item_spacing = egui::vec2(6.0, 6.0);
+    style.spacing.button_padding = egui::vec2(7.0, 5.0);
+    style.spacing.item_spacing = egui::vec2(4.0, 6.0);
     style.visuals = if palette.dark {
       egui::Visuals::dark()
     } else {
@@ -109,6 +109,11 @@ pub fn configure(context: &egui::Context) {
     style.visuals.widgets.inactive.weak_bg_fill = palette.card;
     style.visuals.widgets.inactive.bg_fill = palette.card;
     style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.border);
+    style.visuals.widgets.inactive.corner_radius = 6.into();
+    style.visuals.widgets.hovered.corner_radius = 6.into();
+    style.visuals.widgets.active.corner_radius = 6.into();
+    style.visuals.widgets.hovered.bg_stroke = Stroke::NONE;
+    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, palette.accent);
     style.visuals.selection.bg_fill = palette.selected;
     style.visuals.selection.stroke = Stroke::new(1.0, palette.accent);
     style.visuals.widgets.active.bg_fill = palette.selected;

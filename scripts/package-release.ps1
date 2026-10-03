@@ -20,7 +20,7 @@ try {
   $asset = Join-Path $destination $name
   Copy-Item -LiteralPath $source -Destination $asset -Force
   & "$PSScriptRoot/sign.ps1" -Path $asset
-  $licenseFiles = @('LICENSE', 'THIRD_PARTY_NOTICES.md', 'docs/licenses/OPEN-SANS-OFL.txt', 'docs/licenses/ACADSHARP-LICENSE.txt', 'docs/licenses/DOTNET-LICENSE.txt', 'docs/licenses/DOTNET-NATIVE-NOTICES.txt', 'docs/licenses/NETWORK-LICENSES.txt')
+  $licenseFiles = @('LICENSE', 'THIRD_PARTY_NOTICES.md', 'docs/licenses/OPEN-SANS-OFL.txt', 'docs/licenses/ACADSHARP-LICENSE.txt', 'docs/licenses/DOTNET-LICENSE.txt', 'docs/licenses/DOTNET-NATIVE-NOTICES.txt', 'docs/licenses/NETWORK-LICENSES.txt', 'assets/lucide/LICENSE.txt')
   $notices = ($licenseFiles | ForEach-Object { Get-Content -LiteralPath $_ -Raw }) -join "`n`n"
   [System.IO.File]::WriteAllText((Join-Path $destination 'THIRD-PARTY-LICENSES.txt'), $notices, [System.Text.UTF8Encoding]::new($false))
   $payload = Join-Path $projectRoot 'dist/payload'

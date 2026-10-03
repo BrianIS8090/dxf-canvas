@@ -20,6 +20,7 @@ mod geometry;
 mod hatch;
 #[cfg(test)]
 mod heavy_tests;
+mod icons;
 mod layout;
 mod line_batch;
 mod loading;
