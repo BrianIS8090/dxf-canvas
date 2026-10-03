@@ -1,6 +1,7 @@
 param([string]$Compiler = $env:DXF_ISCC)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
+if (!('DxfShortcut' -as [type])) { Add-Type -Path "$PSScriptRoot/ShortcutPath.cs" }
 $root = [IO.Path]::GetFullPath((Join-Path $projectRoot 'test-output/installer'))
 New-Item -ItemType Directory -Path $root -Force | Out-Null
 $checks = [Collections.Generic.List[string]]::new()
@@ -21,7 +22,7 @@ $exe = Join-Path $install 'dxf-canvas.exe'
 $uninstaller = Join-Path $install 'unins000.exe'
 $registry = 'HKCU:\Software\Classes\DXFCanvasInstallerTest'
 $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DXFCanvasInstallerTest_is1'
-$shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'DXF Canvas Installer Test/DXF Canvas Installer Test.lnk'
+$shortcut = [IO.Path]::GetFullPath((Join-Path ([Environment]::GetFolderPath('Programs')) 'DXF Canvas Installer Test/DXF Canvas Installer Test.lnk'))
 $source = Join-Path $projectRoot 'dist/payload/dxf-canvas.exe'
 $sourceHash = (Get-FileHash -LiteralPath $source).Hash
 $version = (Get-Item -LiteralPath $source).VersionInfo.ProductVersion
@@ -36,13 +37,13 @@ try {
     Assert-Check ((Get-Item -LiteralPath $exe).VersionInfo.ProductVersion -eq $version) "$phase : версия EXE верна"
     Assert-Check ((Get-ItemProperty $uninstallKey).DisplayVersion -eq $version) "$phase : версия в списке программ верна"
     Assert-Check (Test-Path -LiteralPath $shortcut) "$phase : создан ярлык меню Пуск"
-    $link = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut)
+    $target = [DxfShortcut]::Read($shortcut)
     # Shell может вернуть короткое имя 8.3: сравниваем оба пути через файловую систему.
     $filesystem = New-Object -ComObject Scripting.FileSystemObject
-    [PSCustomObject]@{ expected=$exe; actual=$link.TargetPath; expected_short=$filesystem.GetFile($exe).ShortPath } |
+    [PSCustomObject]@{ expected=$exe; actual=$target; expected_short=$filesystem.GetFile($exe).ShortPath } |
       ConvertTo-Json | Set-Content -LiteralPath "$root/shortcut-$phase.json" -Encoding UTF8
-    Assert-Check (Test-Path -LiteralPath $link.TargetPath) "$phase : цель ярлыка существует"
-    Assert-Check ($filesystem.GetFile($link.TargetPath).ShortPath -eq $filesystem.GetFile($exe).ShortPath) "$phase : ярлык ведёт на постоянный путь"
+    Assert-Check (Test-Path -LiteralPath $target) "$phase : цель ярлыка существует"
+    Assert-Check ($filesystem.GetFile($target).ShortPath -eq $filesystem.GetFile($exe).ShortPath) "$phase : ярлык ведёт на постоянный путь"
     foreach ($extension in @('DXF', 'DWG')) {
       $command = (Get-Item "$registry.$extension\shell\open\command").GetValue('')
       Assert-Check ($command -eq "`"$exe`" `"%1`"") "$phase : $extension открывается с корректными кавычками"
