@@ -13,7 +13,8 @@ $certificate = Get-Item -LiteralPath "Cert:\$store\My\$thumbprint"
 if (!$certificate.HasPrivateKey -or $certificate.NotAfter -le (Get-Date) -or $certificate.NotBefore -gt (Get-Date)) {
   throw 'Сертификат не действителен или не содержит закрытого ключа'
 }
-if (!($certificate.EnhancedKeyUsageList | Where-Object { $_.ObjectId.Value -eq '1.3.6.1.5.5.7.3.3' })) {
+$usage = $certificate.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' }
+if (!($usage.EnhancedKeyUsages | Where-Object { $_.Value -eq '1.3.6.1.5.5.7.3.3' })) {
   throw 'Сертификат не предназначен для подписи программ'
 }
 $signTool = $env:DXF_SIGNTOOL

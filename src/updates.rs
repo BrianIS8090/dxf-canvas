@@ -1,4 +1,5 @@
 use std::{
+  io::Write,
   path::{Path, PathBuf},
   sync::mpsc::{self, Receiver},
   time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -121,10 +122,13 @@ fn read_preferences(path: &Path) -> Preferences {
 }
 
 fn write_preferences(path: &Path, preferences: &Preferences) -> std::io::Result<()> {
-  if let Some(parent) = path.parent() {
-    std::fs::create_dir_all(parent)?;
-  }
-  std::fs::write(path, serde_json::to_vec(preferences)?)
+  let parent = path.parent().unwrap_or_else(|| Path::new("."));
+  std::fs::create_dir_all(parent)?;
+  let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+  temporary.write_all(&serde_json::to_vec(preferences)?)?;
+  temporary.as_file().sync_all()?;
+  temporary.persist(path).map_err(|error| error.error)?;
+  Ok(())
 }
 
 fn now() -> u64 {
@@ -372,6 +376,8 @@ mod tests {
     let prefs = read_preferences(&path);
     assert!(prefs.disabled);
     assert_eq!(prefs.last_attempt, 42);
+    write_preferences(&path, &Preferences::default()).unwrap();
+    assert!(!read_preferences(&path).disabled);
   }
 
   #[test]
@@ -406,8 +412,9 @@ mod tests {
         crate::theme::configure(&context);
         crate::theme::apply(&context, dark);
         for _ in 0..2 {
-          let output = context.run_ui(egui::RawInput::default(), |_| updates.show(&context));
+          let mut output = context.run_ui(egui::RawInput::default(), |_| updates.show(&context));
           assert!(output.platform_output.commands.is_empty());
+          output.textures_delta.clear();
         }
         assert!(updates.open);
       }
