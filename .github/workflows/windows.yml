@@ -18,7 +18,7 @@ jobs:
   build:
     name: Windows x64
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 45
     defaults:
       run:
         shell: pwsh
@@ -53,6 +53,8 @@ jobs:
         run: cargo build --locked --release
       - name: Подготовить файлы выпуска
         run: ./scripts/package-release.ps1
+      - name: Проверить установку, восстановление и удаление
+        run: ./scripts/verify-installer.ps1
       - name: Сохранить EXE и контрольную сумму
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -61,8 +63,16 @@ jobs:
             dist/release/*.exe
             dist/release/SHA256SUMS.txt
             dist/release/THIRD-PARTY-LICENSES.txt
+            dist/release/SIGNING.json
           if-no-files-found: error
           retention-days: 14
+      - name: Сохранить результаты проверки установщика
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: installer-checks
+          path: test-output/installer
+          if-no-files-found: ignore
 
   release:
     name: Черновик релиза

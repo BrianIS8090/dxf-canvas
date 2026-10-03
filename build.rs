@@ -22,11 +22,13 @@ fn main() {
   let icon_path = output.join("dxf-canvas.ico");
   fs::write(&icon_path, icon_file()).expect("Не удалось создать иконку");
   let resource_path = output.join("dxf-canvas.rc");
+  let version = env::var("CARGO_PKG_VERSION").expect("Не задана версия");
+  let numbers = format!("{},0", version.replace('.', ","));
   fs::write(
     &resource_path,
     format!(
-      "1 ICON \"{}\"\n",
-      icon_path.display().to_string().replace('\\', "/")
+      "1 ICON \"{}\"\n1 VERSIONINFO\nFILEVERSION {numbers}\nPRODUCTVERSION {numbers}\nFILEOS 0x40004\nFILETYPE 1\nBEGIN\n BLOCK \"StringFileInfo\"\n BEGIN\n  BLOCK \"040904B0\"\n  BEGIN\n   VALUE \"CompanyName\", \"BrianIS8090\\0\"\n   VALUE \"FileDescription\", \"DXF Canvas\\0\"\n   VALUE \"FileVersion\", \"{version}\\0\"\n   VALUE \"ProductName\", \"DXF Canvas\\0\"\n   VALUE \"ProductVersion\", \"{version}\\0\"\n   VALUE \"OriginalFilename\", \"dxf-canvas.exe\\0\"\n  END\n END\n BLOCK \"VarFileInfo\"\n BEGIN\n  VALUE \"Translation\", 0x409, 1200\n END\nEND\n",
+      icon_path.display().to_string().replace('\\', "/"),
     ),
   )
   .expect("Не удалось создать описание ресурса");
