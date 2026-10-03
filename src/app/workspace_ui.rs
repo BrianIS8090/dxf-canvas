@@ -854,7 +854,10 @@ impl DxfCanvasApp {
                   )
                   .inner
                   .on_hover_cursor(egui::CursorIcon::PointingHand)
-                  .on_hover_text(item.path.display().to_string());
+                  .on_hover_text(format!(
+                    "{}\nДвойной щелчок — приблизить файл",
+                    item.path.display()
+                  ));
                 if response.clicked() {
                   self.selected_item = Some(index);
                 }
@@ -898,7 +901,7 @@ impl DxfCanvasApp {
               }
               if selected {
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                   if icon_button(ui, Icon::Focus, "Приблизить", true, true, false).clicked()
                   {
                     focus = Some(index);
@@ -1100,34 +1103,42 @@ impl DxfCanvasApp {
   }
 
   pub(super) fn show_status(&mut self, root: &mut egui::Ui) {
+    let palette = Palette::get(root.ctx());
     egui::Panel::bottom("workspace_status")
       .frame(
         egui::Frame::new()
-          .fill(Palette::get(root.ctx()).panel)
-          .inner_margin(8.0),
+          .fill(palette.panel)
+          .inner_margin(egui::Margin::symmetric(12, 7)),
       )
       .show(root, |ui| {
-        ui.horizontal_wrapped(|ui| {
-          if !self.items.is_empty()
-            && !self.workspace.inspector_visible
-            && ui.button("Показать панель").clicked()
-          {
-            self.workspace.inspector_visible = true;
-          }
-          ui.label(
-            RichText::new(
-              self
-                .measurements
-                .notice
-                .as_deref()
-                .unwrap_or(self.measurements.hint()),
-            )
-            .color(if self.measurements.notice.is_some() {
-              Palette::get(ui.ctx()).warning
-            } else {
-              Palette::get(ui.ctx()).muted
-            }),
-          );
+        ui.horizontal(|ui| {
+          let (icon, label) = match self.measurements.tool {
+            Tool::Select => (Icon::Select, "Выбор"),
+            Tool::Linear => (Icon::Linear, "Линейный"),
+            Tool::Diameter => (Icon::Diameter, "Диаметр"),
+            Tool::Radius => (Icon::Radius, "Радиус"),
+            Tool::Angle => (Icon::Angle, "Угол"),
+            Tool::Region => (Icon::Region, "Площадь"),
+          };
+          ui.add(icon.image(ui.ctx(), 14.0).tint(palette.accent));
+          ui.label(RichText::new(label).small().color(palette.accent));
+          ui.separator();
+          let hint = self
+            .measurements
+            .notice
+            .as_deref()
+            .unwrap_or(self.measurements.hint());
+          ui.add(
+            egui::Label::new(RichText::new(hint).small().color(
+              if self.measurements.notice.is_some() {
+                palette.warning
+              } else {
+                palette.muted
+              },
+            ))
+            .truncate(),
+          )
+          .on_hover_text(hint);
         });
       });
   }
