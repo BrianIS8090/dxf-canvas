@@ -36,7 +36,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           shared-key: windows-x64
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
       - name: Проверить форматирование
         run: cargo fmt --check
       - name: Установить .NET SDK для сборки DWG-конвертера
@@ -53,8 +53,6 @@ jobs:
         run: cargo build --locked --release
       - name: Подготовить файлы выпуска
         run: ./scripts/package-release.ps1
-      - name: Проверить установку, восстановление и удаление
-        run: ./scripts/verify-installer.ps1
       - name: Сохранить EXE и контрольную сумму
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -66,6 +64,8 @@ jobs:
             dist/release/SIGNING.json
           if-no-files-found: error
           retention-days: 14
+      - name: Проверить установку, восстановление и удаление
+        run: ./scripts/verify-installer.ps1
       - name: Сохранить результаты проверки установщика
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

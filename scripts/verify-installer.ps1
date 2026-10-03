@@ -37,7 +37,12 @@ try {
     Assert-Check ((Get-ItemProperty $uninstallKey).DisplayVersion -eq $version) "$phase : версия в списке программ верна"
     Assert-Check (Test-Path -LiteralPath $shortcut) "$phase : создан ярлык меню Пуск"
     $link = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut)
-    Assert-Check ($link.TargetPath -eq $exe) "$phase : ярлык ведёт на постоянный путь"
+    # Shell может вернуть короткое имя 8.3: сравниваем оба пути через файловую систему.
+    $filesystem = New-Object -ComObject Scripting.FileSystemObject
+    [PSCustomObject]@{ expected=$exe; actual=$link.TargetPath; expected_short=$filesystem.GetFile($exe).ShortPath } |
+      ConvertTo-Json | Set-Content -LiteralPath "$root/shortcut-$phase.json" -Encoding UTF8
+    Assert-Check (Test-Path -LiteralPath $link.TargetPath) "$phase : цель ярлыка существует"
+    Assert-Check ($filesystem.GetFile($link.TargetPath).ShortPath -eq $filesystem.GetFile($exe).ShortPath) "$phase : ярлык ведёт на постоянный путь"
     foreach ($extension in @('DXF', 'DWG')) {
       $command = (Get-Item "$registry.$extension\shell\open\command").GetValue('')
       Assert-Check ($command -eq "`"$exe`" `"%1`"") "$phase : $extension открывается с корректными кавычками"
