@@ -1,7 +1,7 @@
 param([string]$Compiler = $env:DXF_ISCC)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$root = Join-Path $projectRoot 'test-output/installer'
+$root = [IO.Path]::GetFullPath((Join-Path $projectRoot 'test-output/installer'))
 New-Item -ItemType Directory -Path $root -Force | Out-Null
 $checks = [Collections.Generic.List[string]]::new()
 function Assert-Check([bool]$Condition, [string]$Message) {
