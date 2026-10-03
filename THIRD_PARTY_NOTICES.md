@@ -3,6 +3,7 @@ DXF Холст — сторонние компоненты
 Приложение использует открытые библиотеки Rust и встроенный конвертер DWG на ACadSharp 3.7.1 (MIT). Конвертер собран в автономный Windows x64 EXE с NativeAOT .NET 10.0.10: установка .NET и CAD-системы не нужна. Точные версии закреплены в Cargo.lock и tools/dwg-converter/packages.lock.json; лицензия самого приложения — MIT.
 
 Основные компоненты:
+- Lucide — ISC / MIT, иконки интерфейса (исходники и лицензия: assets/lucide).
 - egui / eframe — MIT OR Apache-2.0, интерфейс и отрисовка.
 - dxf — MIT, чтение DXF.
 - rfd — MIT, выбор файлов.

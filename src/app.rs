@@ -485,11 +485,19 @@ impl DxfCanvasApp {
     }
 
     if self.items.is_empty() {
-      draw_empty_state(&painter, rect);
+      draw_empty_state(ui, &painter, rect);
       let button_rect =
         Rect::from_center_size(rect.center() + Vec2::new(0.0, 90.0), Vec2::new(230.0, 38.0));
       if ui
-        .put(button_rect, egui::Button::new("Открыть файлы · Ctrl+O"))
+        .put(
+          button_rect,
+          egui::Button::new((
+            crate::icons::Icon::Open.image(ui.ctx(), 18.0),
+            "Открыть файлы · Ctrl+O",
+          ))
+          .image_tint_follows_text_color(true)
+          .corner_radius(6.0),
+        )
         .clicked()
       {
         self.choose_files();
@@ -941,13 +949,20 @@ fn move_item_by_screen_delta(item: &mut DrawingItem, delta: Vec2, view_scale: f3
   item.offset.y -= delta.y as f64 / view_scale as f64;
 }
 
-fn draw_empty_state(painter: &egui::Painter, rect: Rect) {
+fn draw_empty_state(ui: &mut egui::Ui, painter: &egui::Painter, rect: Rect) {
   let center = rect.center();
+  let palette = Palette::get(painter.ctx());
+  let icon_rect = Rect::from_center_size(center - Vec2::new(0.0, 96.0), Vec2::splat(56.0));
+  painter.rect_filled(icon_rect, 14.0, palette.selected);
+  crate::icons::Icon::Files
+    .image(painter.ctx(), 28.0)
+    .tint(palette.accent)
+    .paint_at(ui, icon_rect.shrink(14.0));
   painter.text(
     center - Vec2::new(0.0, 32.0),
     Align2::CENTER_CENTER,
     "Перетащите сюда DWG- или DXF-файлы",
-    FontId::proportional(25.0),
+    FontId::proportional(22.0),
     Palette::get(painter.ctx()).text,
   );
   painter.text(

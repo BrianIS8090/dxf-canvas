@@ -1,0 +1,33 @@
+{
+  "repository": "https://github.com/lucide-icons/lucide",
+  "commit": "aace268b9be318c4f6d8a09a35139f860d07d9c5",
+  "names": [
+    "folder-open",
+    "scan",
+    "layout-grid",
+    "sliders-horizontal",
+    "circle-question-mark",
+    "sun",
+    "moon",
+    "mouse-pointer-2",
+    "ruler",
+    "diameter",
+    "radius",
+    "triangle",
+    "pentagon",
+    "undo-2",
+    "list",
+    "scan-line",
+    "panel-right",
+    "files",
+    "layers",
+    "search",
+    "x",
+    "focus",
+    "minus",
+    "plus",
+    "download",
+    "trash"
+  ],
+  "size": 96
+}

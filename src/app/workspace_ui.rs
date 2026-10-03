@@ -1,4 +1,5 @@
 use super::*;
+use crate::icons::{Icon, button as icon_button};
 
 #[derive(Clone, Copy, Default, PartialEq)]
 enum InspectorTab {
@@ -38,14 +39,16 @@ mod tests {
   fn click_label(app: &mut DxfCanvasApp, context: &egui::Context, width: f32, label: &str) {
     let _ = frame(app, context, width, vec![]);
     let output = frame(app, context, width, vec![]);
-    let point = output
-      .shapes
-      .iter()
-      .find_map(|shape| match &shape.shape {
-        egui::Shape::Text(text) if text.galley.text() == label => {
-          Some(text.pos + text.galley.size() * 0.5)
-        }
-        _ => None,
+    let point = context
+      .data_mut(|data| data.get_temp::<Rect>(egui::Id::new(("control", label))))
+      .map(|rect| rect.center())
+      .or_else(|| {
+        output.shapes.iter().find_map(|shape| match &shape.shape {
+          egui::Shape::Text(text) if text.galley.text() == label => {
+            Some(text.pos + text.galley.size() * 0.5)
+          }
+          _ => None,
+        })
       })
       .unwrap_or_else(|| panic!("Кнопка не найдена: {label}"));
     for pressed in [true, false] {
@@ -109,6 +112,83 @@ mod tests {
         assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == Palette::new(dark).panel)));
       }
     }
+  }
+
+  #[test]
+  fn compact_toolbar_targets_fit_at_windows_display_scales() {
+    for width in [760.0, 1024.0, 1280.0] {
+      for scale in [1.0, 1.5, 2.0] {
+        let mut app = super::super::tests::focus_test_app();
+        let context = egui::Context::default();
+        configure_fonts_and_style(&context);
+        context.set_pixels_per_point(scale);
+        let _ = frame(&mut app, &context, width, vec![]);
+        let _ = frame(&mut app, &context, width, vec![]);
+        let mut buttons = Vec::new();
+        for label in [
+          "Добавить файлы",
+          "Вписать всё",
+          "Разложить",
+          "Справка · F1",
+          "Тёмная тема",
+          "Выбор",
+          "Линейный",
+          "Диаметр",
+          "Радиус",
+          "Угол",
+          "Площадь",
+          "Отменить",
+          "Проверить",
+          "Боковая панель",
+        ] {
+          let rect = context
+            .data_mut(|data| data.get_temp::<Rect>(egui::Id::new(("control", label))))
+            .unwrap();
+          assert!(
+            rect.left() >= 0.0 && rect.right() <= width,
+            "Кнопка {label} вне окна: {rect:?}, ширина {width}"
+          );
+          assert!(
+            rect.width() >= 32.0 && rect.height() >= 32.0,
+            "Маленькая цель: {label}"
+          );
+          assert!(rect.bottom() <= 100.0, "Панель слишком высокая: {rect:?}");
+          for (other, previous) in &buttons {
+            assert!(
+              !rect.intersects(*previous),
+              "Кнопки {label} и {other} пересекаются"
+            );
+          }
+          buttons.push((label, rect));
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn icon_tools_sidebar_and_undo_remain_operable_in_a_narrow_window() {
+    let mut app = super::super::tests::focus_test_app();
+    let context = egui::Context::default();
+    configure_fonts_and_style(&context);
+    for (label, tool) in [
+      ("Линейный", Tool::Linear),
+      ("Диаметр", Tool::Diameter),
+      ("Радиус", Tool::Radius),
+      ("Угол", Tool::Angle),
+      ("Площадь", Tool::Region),
+      ("Выбор", Tool::Select),
+    ] {
+      click_label(&mut app, &context, 760.0, label);
+      assert_eq!(app.measurements.tool, tool);
+      assert_eq!(app.measurements.completed.len(), 1);
+    }
+    click_label(&mut app, &context, 760.0, "Боковая панель");
+    assert!(!app.workspace.inspector_visible);
+    click_label(&mut app, &context, 760.0, "Боковая панель");
+    assert!(app.workspace.inspector_visible);
+    click_label(&mut app, &context, 760.0, "Отменить");
+    assert!(app.measurements.completed.is_empty());
+    assert_eq!(app.items.len(), 2);
   }
 
   #[test]
@@ -391,115 +471,264 @@ impl DxfCanvasApp {
   }
 
   pub(super) fn show_toolbar(&mut self, root: &mut egui::Ui) {
+    let palette = Palette::get(root.ctx());
+    let loaded = !self.items.is_empty();
     egui::Panel::top("toolbar")
-      .frame(egui::Frame::new().fill(Palette::get(root.ctx()).panel).inner_margin(10.0))
+      .frame(
+        egui::Frame::new()
+          .fill(palette.panel)
+          .inner_margin(egui::Margin::symmetric(12, 6)),
+      )
       .show(root, |ui| {
-        ui.horizontal_wrapped(|ui| {
-          ui.heading(RichText::new("DXF Холст").size(20.0).color(Palette::get(ui.ctx()).accent));
-          ui.menu_button(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).small(), |ui| {
-            ui.set_max_width(450.0);
-            if ui.button("Обновления…").clicked() {
-              self.updates.open = true;
-              ui.close();
-            }
-            ui.separator();
-            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-              ui.label(include_str!("../../THIRD_PARTY_NOTICES.md"));
-              ui.collapsing("Лицензия приложения", |ui| { ui.label(include_str!("../../LICENSE")); });
-              ui.collapsing("Open Sans / Open Sans Condensed — OFL 1.1", |ui| { ui.label(include_str!("../../docs/licenses/OPEN-SANS-OFL.txt")); });
-              ui.collapsing("ACadSharp / CSUtilities", |ui| { ui.label(include_str!("../../docs/licenses/ACADSHARP-LICENSE.txt")); });
-              ui.collapsing(".NET NativeAOT", |ui| {
-                ui.label(include_str!("../../docs/licenses/DOTNET-LICENSE.txt"));
-                ui.label(include_str!("../../docs/licenses/DOTNET-NATIVE-NOTICES.txt"));
-              });
-            });
-          });
+        let wide = ui.available_width() >= 1020.0;
+        ui.horizontal(|ui| {
+          ui.label(RichText::new("DXF Холст").size(17.0).strong());
+          ui.menu_button(
+            RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
+              .small()
+              .color(palette.muted),
+            |ui| {
+              ui.set_max_width(450.0);
+              if icon_button(ui, Icon::Download, "Обновления…", true, true, false).clicked()
+              {
+                self.updates.open = true;
+                ui.close();
+              }
+              ui.separator();
+              egui::ScrollArea::vertical()
+                .max_height(420.0)
+                .show(ui, |ui| {
+                  ui.label(include_str!("../../THIRD_PARTY_NOTICES.md"));
+                  ui.collapsing("Лицензия приложения", |ui| {
+                    ui.label(include_str!("../../LICENSE"));
+                  });
+                  ui.collapsing("Lucide — ISC / MIT", |ui| {
+                    ui.label(include_str!("../../assets/lucide/LICENSE.txt"));
+                  });
+                  ui.collapsing("Open Sans — OFL 1.1", |ui| {
+                    ui.label(include_str!("../../docs/licenses/OPEN-SANS-OFL.txt"));
+                  });
+                  ui.collapsing("ACadSharp / CSUtilities", |ui| {
+                    ui.label(include_str!("../../docs/licenses/ACADSHARP-LICENSE.txt"));
+                  });
+                  ui.collapsing(".NET NativeAOT", |ui| {
+                    ui.label(include_str!("../../docs/licenses/DOTNET-LICENSE.txt"));
+                    ui.label(include_str!(
+                      "../../docs/licenses/DOTNET-NATIVE-NOTICES.txt"
+                    ));
+                  });
+                });
+            },
+          );
           ui.separator();
-          if ui.add(egui::Button::new(RichText::new("Добавить DWG / DXF").color(Color32::WHITE)).fill(Color32::from_rgb(30, 94, 168)))
-            .on_hover_text("Выбрать один или несколько файлов · Ctrl+O\nТакже можно перетащить файлы в окно. Новые файлы появятся справа от существующих; «Вписать всё» покажет их без перестановки.").clicked() {
+          if icon_button(ui, Icon::Open, "Добавить файлы", true, true, false)
+            .on_hover_text("DWG / DXF · Ctrl+O\nТакже можно перетащить файлы в окно.")
+            .clicked()
+          {
             self.choose_files();
           }
-          if ui.add_enabled(!self.items.is_empty(), egui::Button::new("Вписать всё"))
-            .on_hover_text("Показать все чертежи · Ctrl+0").clicked() {
+          ui.separator();
+          if icon_button(ui, Icon::Fit, "Вписать всё", wide, loaded, false)
+            .on_hover_text("Показать все чертежи · Ctrl+0")
+            .clicked()
+          {
             self.needs_fit = true;
           }
-          if ui.add_enabled(!self.items.is_empty(), egui::Button::new("Разложить"))
-            .on_hover_text("Автоматически расположить все файлы и вписать их в окно. Текущая ручная раскладка будет заменена; углы поворота и масштабы сохранятся.").clicked() {
+          if icon_button(ui, Icon::Arrange, "Разложить", wide, loaded, false)
+            .on_hover_text(
+              "Расположить все файлы заново и вписать в окно. Углы поворота и масштабы сохранятся.",
+            )
+            .clicked()
+          {
             self.needs_layout = true;
             self.needs_fit = true;
           }
-          ui.menu_button("Холст", |ui| {
-            ui.checkbox(&mut self.workspace.inspector_visible, "Боковая панель");
-            ui.separator();
-            ui.label(RichText::new("Подписи на холсте").strong());
-            ui.add(egui::Slider::new(&mut self.label_font_size, 8.0..=36.0).step_by(1.0).suffix(" px"));
-            ui.label(RichText::new("Один размер для всех файлов и измерений").small());
-            ui.separator();
-            if ui.add_enabled(!self.items.is_empty(), egui::Button::new("Очистить холст…")).clicked() {
-              self.workspace.clear_target = Some(ClearTarget::Canvas);
-              ui.close();
+          ui.menu_button(
+            (
+              Icon::Settings.image(ui.ctx(), 16.0).tint(palette.muted),
+              "Холст",
+            ),
+            |ui| {
+              ui.checkbox(&mut self.workspace.inspector_visible, "Боковая панель");
+              ui.separator();
+              ui.label(RichText::new("Подписи на холсте").strong());
+              ui.add(
+                egui::Slider::new(&mut self.label_font_size, 8.0..=36.0)
+                  .step_by(1.0)
+                  .suffix(" px"),
+              );
+              ui.label(RichText::new("Один размер для всех файлов и измерений").small());
+              ui.separator();
+              if icon_button(ui, Icon::Trash, "Очистить холст…", true, loaded, false).clicked()
+              {
+                self.workspace.clear_target = Some(ClearTarget::Canvas);
+                ui.close();
+              }
+            },
+          );
+          ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let dark = palette.dark;
+            if icon_button(
+              ui,
+              if dark { Icon::Sun } else { Icon::Moon },
+              if dark {
+                "Светлая тема"
+              } else {
+                "Тёмная тема"
+              },
+              false,
+              true,
+              false,
+            )
+            .clicked()
+            {
+              crate::theme::apply(ui.ctx(), !dark);
+              self.workspace.theme_dirty = true;
+            }
+            if icon_button(
+              ui,
+              Icon::Help,
+              "Справка · F1",
+              false,
+              true,
+              self.workspace.help_open,
+            )
+            .clicked()
+            {
+              self.workspace.help_open = true;
+            }
+            if self.updates.available()
+              && icon_button(ui, Icon::Download, "Доступно обновление", false, true, true).clicked()
+            {
+              self.updates.open = true;
             }
           });
-          if ui.add_enabled(!self.items.is_empty(), egui::Button::new(if self.diagnostics.enabled { "Проверка включена" } else { "Проверить" }).selected(self.diagnostics.enabled))
-            .on_hover_text("Подсветить проблемные места и открыть сводку. Повторное нажатие выключает подсветку. Исходный файл не изменяется.").clicked() {
-            self.toggle_check();
-          }
-          if ui.button("Справка · F1").clicked() {
-            self.workspace.help_open = true;
-          }
-          if self.updates.available()
-            && ui.button(RichText::new("Доступно обновление").color(Palette::get(ui.ctx()).accent)).clicked() {
-            self.updates.open = true;
-          }
-          let dark = Palette::get(ui.ctx()).dark;
-          if ui.button(if dark { "Светлая тема" } else { "Тёмная тема" })
-            .on_hover_text("Переключить оформление интерфейса и холста. Выбор сохраняется между запусками.").clicked() {
-            crate::theme::apply(ui.ctx(), !dark);
-            self.workspace.theme_dirty = true;
-          }
         });
-        ui.add_space(6.0);
         ui.separator();
-        ui.horizontal_wrapped(|ui| {
-          for (tool, label, description) in [
-            (Tool::Select, "Выбор · V", "Перемещать и масштабировать файлы на холсте"),
-            (Tool::Linear, "Линейный · L", "Две точки с привязками, затем положение размера"),
-            (Tool::Diameter, "Диаметр · D", "Диаметр круглого отверстия"),
-            (Tool::Radius, "Радиус · R", "Радиус круговой дуги скругления"),
-            (Tool::Angle, "Угол · G", "Первая точка, вершина, третья точка"),
-            (Tool::Region, "Площадь · A", "Площадь и периметр детали или отдельного контура"),
+        ui.horizontal(|ui| {
+          for (tool, icon, label, description) in [
+            (
+              Tool::Select,
+              Icon::Select,
+              "Выбор",
+              "V · Перемещать и масштабировать файлы",
+            ),
+            (
+              Tool::Linear,
+              Icon::Linear,
+              "Линейный",
+              "L · Две точки с привязками, затем положение размера",
+            ),
+            (
+              Tool::Diameter,
+              Icon::Diameter,
+              "Диаметр",
+              "D · Диаметр круглого отверстия",
+            ),
+            (
+              Tool::Radius,
+              Icon::Radius,
+              "Радиус",
+              "R · Радиус круговой дуги",
+            ),
+            (
+              Tool::Angle,
+              Icon::Angle,
+              "Угол",
+              "G · Первая точка, вершина, третья точка",
+            ),
+            (
+              Tool::Region,
+              Icon::Region,
+              "Площадь",
+              "A · Площадь и периметр детали или контура",
+            ),
           ] {
-            if ui.add_enabled(!self.items.is_empty() || tool == Tool::Select,
-              egui::Button::new(label).selected(self.measurements.tool == tool))
-              .on_hover_text(description).clicked() {
+            if icon_button(
+              ui,
+              icon,
+              label,
+              wide,
+              loaded || tool == Tool::Select,
+              self.measurements.tool == tool,
+            )
+            .on_hover_text(format!(
+              "{description}\nEsc — отменить построение; повторно — к выбору"
+            ))
+            .clicked()
+            {
               self.measurements.set_tool(tool);
               self.interaction = None;
             }
           }
           ui.separator();
-          if ui.add_enabled(self.measurements.can_undo(), egui::Button::new("Отменить"))
-            .on_hover_text("Ctrl+Z — отменить текущий или последний размер").clicked() {
+          if icon_button(
+            ui,
+            Icon::Undo,
+            "Отменить",
+            false,
+            self.measurements.can_undo(),
+            false,
+          )
+          .on_hover_text("Ctrl+Z · Отменить текущий или последний размер")
+          .clicked()
+          {
             self.measurements.undo();
           }
-          ui.menu_button(format!("Размеры: {}", self.measurements.completed.len()), |ui| {
-            ui.label("Размеры рассчитаны по исходной геометрии.");
-            ui.label("Масштаб детали на холсте на результат не влияет.");
-            if ui.add_enabled(!self.measurements.completed.is_empty(), egui::Button::new("Убрать все размеры…")).clicked() {
-              self.workspace.clear_target = Some(ClearTarget::Dimensions);
-              ui.close();
+          ui.menu_button(
+            (
+              Icon::Dimensions.image(ui.ctx(), 16.0).tint(palette.muted),
+              format!("Размеры: {}", self.measurements.completed.len()),
+            ),
+            |ui| {
+              ui.label("Размеры рассчитаны по исходной геометрии.");
+              ui.label("Масштаб детали на холсте на результат не влияет.");
+              if icon_button(
+                ui,
+                Icon::Trash,
+                "Убрать все размеры…",
+                true,
+                !self.measurements.completed.is_empty(),
+                false,
+              )
+              .clicked()
+              {
+                self.workspace.clear_target = Some(ClearTarget::Dimensions);
+                ui.close();
+              }
+            },
+          );
+          ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if icon_button(
+              ui,
+              Icon::Sidebar,
+              "Боковая панель",
+              false,
+              loaded,
+              self.workspace.inspector_visible && loaded,
+            )
+            .clicked()
+            {
+              self.workspace.inspector_visible = !self.workspace.inspector_visible;
+            }
+            if icon_button(
+              ui,
+              Icon::Check,
+              "Проверить",
+              wide,
+              loaded,
+              self.diagnostics.enabled,
+            )
+            .on_hover_text("Подсветить проблемные места. Повторное нажатие выключает подсветку.")
+            .clicked()
+            {
+              self.toggle_check();
             }
           });
         });
         if self.measurements.tool == Tool::Region {
-          ui.add_space(5.0);
-          egui::Frame::new().fill(Palette::get(ui.ctx()).card).corner_radius(5.0).inner_margin(8.0).show(ui, |ui| {
-            region_mode_controls(ui, &mut self.measurements);
-            ui.label(RichText::new(if self.measurements.contour_only {
-              "Для планов: один замкнутый контур под курсором. Отверстия внутри не вычитаются."
-            } else {
-              "Для деталей: площадь за вычетом отверстий. Периметр включает отверстия и прорези."
-            }).small().color(Palette::get(ui.ctx()).muted));
-          });
+          ui.separator();
+          region_mode_controls(ui, &mut self.measurements);
         }
       });
   }
@@ -509,7 +738,7 @@ impl DxfCanvasApp {
       return;
     }
     egui::Panel::right("files")
-      .default_size(320.0)
+      .default_size(304.0)
       .min_size(280.0)
       .max_size(460.0)
       .frame(
@@ -518,19 +747,25 @@ impl DxfCanvasApp {
           .inner_margin(12.0),
       )
       .show(root, |ui| {
-        ui.horizontal_wrapped(|ui| {
-          ui.heading("Рабочая область");
+        ui.horizontal(|ui| {
+          ui.label(RichText::new("Чертежи").size(16.0).strong());
           ui.label(
-            RichText::new(format!("{} файлов", self.items.len()))
+            RichText::new(self.items.len().to_string())
               .small()
               .color(Palette::get(ui.ctx()).muted),
           );
         });
-        ui.add_space(8.0);
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
-          ui.selectable_value(&mut self.workspace.tab, InspectorTab::Files, "Файлы");
-          ui.selectable_value(&mut self.workspace.tab, InspectorTab::Layers, "Слои");
-          ui.selectable_value(&mut self.workspace.tab, InspectorTab::Check, "Проверка");
+          for (tab, icon, label) in [
+            (InspectorTab::Files, Icon::Files, "Файлы"),
+            (InspectorTab::Layers, Icon::Layers, "Слои"),
+            (InspectorTab::Check, Icon::Check, "Проверка"),
+          ] {
+            if icon_button(ui, icon, label, true, true, self.workspace.tab == tab).clicked() {
+              self.workspace.tab = tab;
+            }
+          }
         });
         ui.separator();
         match self.workspace.tab {
@@ -543,21 +778,30 @@ impl DxfCanvasApp {
 
   fn files_panel(&mut self, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
+      ui.add(
+        Icon::Search
+          .image(ui.ctx(), 16.0)
+          .tint(Palette::get(ui.ctx()).muted),
+      );
       let width = (ui.available_width() - 38.0).max(80.0);
       ui.add(
         egui::TextEdit::singleline(&mut self.workspace.file_filter)
           .hint_text("Найти файл по названию")
           .desired_width(width),
       );
-      if ui.button("×").on_hover_text("Сбросить поиск").clicked() {
+      if icon_button(
+        ui,
+        Icon::Close,
+        "Сбросить поиск",
+        false,
+        !self.workspace.file_filter.is_empty(),
+        false,
+      )
+      .clicked()
+      {
         self.workspace.file_filter.clear();
       }
     });
-    ui.label(
-      RichText::new("Выберите файл; двойной щелчок — приблизить")
-        .small()
-        .color(Palette::get(ui.ctx()).muted),
-    );
     ui.add_space(6.0);
     let query = self.workspace.file_filter.trim().to_lowercase();
     let mut remove = None;
@@ -618,8 +862,7 @@ impl DxfCanvasApp {
                   self.selected_item = Some(index);
                   focus = Some(index);
                 }
-                if ui
-                  .button("×")
+                if icon_button(ui, Icon::Close, "Убрать файл с холста", false, true, false)
                   .on_hover_text(
                     "Убрать с холста вместе с размерами этого файла. Файл на диске останется.",
                   )
@@ -656,10 +899,12 @@ impl DxfCanvasApp {
               if selected {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                  if ui.button("Приблизить").clicked() {
+                  if icon_button(ui, Icon::Focus, "Приблизить", true, true, false).clicked()
+                  {
                     focus = Some(index);
                   }
-                  if ui.button("Слои файла").clicked() {
+                  if icon_button(ui, Icon::Layers, "Слои файла", true, true, false).clicked()
+                  {
                     self.workspace.tab = InspectorTab::Layers;
                   }
                 });
@@ -679,7 +924,8 @@ impl DxfCanvasApp {
                   ui.label(format!("{:.0}%", item.scale * 100.0));
                 });
                 ui.horizontal(|ui| {
-                  if ui.button("−").clicked() {
+                  if icon_button(ui, Icon::Minus, "Уменьшить деталь", false, true, false).clicked()
+                  {
                     item.scale = (item.scale / 1.1).max(MIN_ITEM_SCALE);
                     changed = true;
                   }
@@ -687,7 +933,8 @@ impl DxfCanvasApp {
                     item.scale = 1.0;
                     changed = true;
                   }
-                  if ui.button("+").clicked() {
+                  if icon_button(ui, Icon::Plus, "Увеличить деталь", false, true, false).clicked()
+                  {
                     item.scale = (item.scale * 1.1).min(MAX_ITEM_SCALE);
                     changed = true;
                   }
@@ -791,7 +1038,8 @@ impl DxfCanvasApp {
       ui.heading("Проверка геометрии");
       ui.label("Разрывы, совпадения, пересечения и другие места, которые стоит проверить перед производством.");
       ui.add_space(8.0);
-      if ui.button("Запустить проверку").clicked() {
+      if icon_button(ui, Icon::Check, "Запустить проверку", true, true, false).clicked()
+      {
         self.toggle_check();
       }
       ui.label(

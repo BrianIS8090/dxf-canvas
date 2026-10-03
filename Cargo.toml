@@ -1,6 +1,6 @@
 [package]
 name = "dxf-canvas"
-version = "0.9.6"
+version = "0.9.7"
 edition = "2024"
 description = "Просмотрщик DXF и DWG для Windows: общий холст, слои, измерения и диагностика геометрии"
 license = "MIT"
@@ -12,6 +12,7 @@ dwg = []
 [dependencies]
 dxf = "0.6.1"
 eframe = "0.36.1"
+image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = "0.15"
 thiserror = "2"
 earcutr = "0.5"
