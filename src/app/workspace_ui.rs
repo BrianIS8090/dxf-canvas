@@ -398,6 +398,11 @@ impl DxfCanvasApp {
           ui.heading(RichText::new("DXF Холст").size(20.0).color(Palette::get(ui.ctx()).accent));
           ui.menu_button(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).small(), |ui| {
             ui.set_max_width(450.0);
+            if ui.button("Обновления…").clicked() {
+              self.updates.open = true;
+              ui.close();
+            }
+            ui.separator();
             egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
               ui.label(include_str!("../../THIRD_PARTY_NOTICES.md"));
               ui.collapsing("Лицензия приложения", |ui| { ui.label(include_str!("../../LICENSE")); });
@@ -441,6 +446,10 @@ impl DxfCanvasApp {
           }
           if ui.button("Справка · F1").clicked() {
             self.workspace.help_open = true;
+          }
+          if self.updates.available()
+            && ui.button(RichText::new("Доступно обновление").color(Palette::get(ui.ctx()).accent)).clicked() {
+            self.updates.open = true;
           }
           let dark = Palette::get(ui.ctx()).dark;
           if ui.button(if dark { "Светлая тема" } else { "Тёмная тема" })
@@ -839,7 +848,7 @@ impl DxfCanvasApp {
   }
 
   pub(super) fn workspace_dialog_open(&self) -> bool {
-    self.workspace.help_open || self.workspace.clear_target.is_some()
+    self.workspace.help_open || self.workspace.clear_target.is_some() || self.updates.open
   }
 
   pub(super) fn show_status(&mut self, root: &mut egui::Ui) {
@@ -877,6 +886,9 @@ impl DxfCanvasApp {
 
   pub(super) fn show_workspace_dialogs(&mut self, context: &egui::Context) {
     egui::Window::new("Управление и измерения").open(&mut self.workspace.help_open).collapsible(false).resizable(true).default_width(550.0).show(context, |ui| {
+      if ui.button("Проверить обновления…").clicked() {
+        self.updates.open = true;
+      }
       egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
         ui.heading("Холст");
         for (key, action) in [

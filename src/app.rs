@@ -90,6 +90,7 @@ pub struct DxfCanvasApp {
   imports: ImportQueue,
   checking: crate::checking::CheckJob,
   workspace: workspace_ui::WorkspaceUi,
+  updates: crate::updates::Updates,
 }
 
 impl DxfCanvasApp {
@@ -114,6 +115,7 @@ impl DxfCanvasApp {
       imports: ImportQueue::default(),
       checking: crate::checking::CheckJob::default(),
       workspace: workspace_ui::WorkspaceUi::default(),
+      updates: crate::updates::Updates::load(),
     };
 
     let startup_files: Vec<_> = std::env::args_os()
@@ -688,6 +690,7 @@ impl DxfCanvasApp {
 impl eframe::App for DxfCanvasApp {
   fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
     let context = root_ui.ctx().clone();
+    self.updates.poll(&context);
     self.handle_shortcuts_and_drop(&context);
     if !self.checking.is_busy() {
       self.poll_imports(&context);
@@ -739,6 +742,7 @@ impl eframe::App for DxfCanvasApp {
     show_loading(&context, &self.imports);
     self.checking.show(&context);
     self.show_workspace_dialogs(&context);
+    self.updates.show(&context);
   }
 }
 
@@ -1073,6 +1077,7 @@ mod tests {
       }],
     }];
     let mut app = DxfCanvasApp {
+      updates: crate::updates::Updates::default(),
       workspace: workspace_ui::WorkspaceUi::default(),
       imports: ImportQueue::default(),
       checking: crate::checking::CheckJob::default(),

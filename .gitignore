@@ -8,6 +8,9 @@
 .env.*
 *.pem
 *.key
+*.pfx
+*.p12
+/test-output/
 *.pdb
 *.log
 .DS_Store

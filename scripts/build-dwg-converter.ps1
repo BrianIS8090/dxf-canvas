@@ -10,6 +10,7 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Не удалось собрать встроенный DWG-конвертер' }
   $converter = Join-Path $projectRoot 'target/dwg-converter/DxfCanvas.DwgConverter.exe'
   if (-not (Test-Path -LiteralPath $converter)) { throw 'Не получен EXE конвертера' }
+  & "$PSScriptRoot/sign.ps1" -Path $converter
   Get-Item -LiteralPath $converter | Select-Object Name, Length
 } finally {
   Pop-Location
