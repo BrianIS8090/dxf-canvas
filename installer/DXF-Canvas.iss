@@ -76,11 +76,11 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\dxf-canvas.exe"; Tasks: deskt
 Root: HKCU; Subkey: "Software\Classes\{#RegistryName}.DXF"; ValueType: string; ValueData: "Чертёж DXF"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\{#RegistryName}.DXF\DefaultIcon"; ValueType: string; ValueData: """{app}\dxf-canvas.exe"",0"
 Root: HKCU; Subkey: "Software\Classes\{#RegistryName}.DXF\shell\open\command"; ValueType: string; ValueData: """{app}\dxf-canvas.exe"" ""%1"""
-Root: HKCU; Subkey: "Software\Classes\.dxf\OpenWithProgids"; ValueName: "{#RegistryName}.DXF"; ValueType: none; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\.dxf\OpenWithProgids"; ValueName: "{#RegistryName}.DXF"; ValueType: string; ValueData: ""; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\Classes\{#RegistryName}.DWG"; ValueType: string; ValueData: "Чертёж DWG"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\{#RegistryName}.DWG\DefaultIcon"; ValueType: string; ValueData: """{app}\dxf-canvas.exe"",0"
 Root: HKCU; Subkey: "Software\Classes\{#RegistryName}.DWG\shell\open\command"; ValueType: string; ValueData: """{app}\dxf-canvas.exe"" ""%1"""
-Root: HKCU; Subkey: "Software\Classes\.dwg\OpenWithProgids"; ValueName: "{#RegistryName}.DWG"; ValueType: none; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\.dwg\OpenWithProgids"; ValueName: "{#RegistryName}.DWG"; ValueType: string; ValueData: ""; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities"; ValueName: "ApplicationName"; ValueType: string; ValueData: "{#AppName}"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities"; ValueName: "ApplicationDescription"; ValueType: string; ValueData: "Просмотр DXF и DWG, слои и измерения"
 Root: HKCU; Subkey: "Software\{#RegistryName}\Capabilities"; ValueName: "ApplicationIcon"; ValueType: string; ValueData: """{app}\dxf-canvas.exe"",0"
