@@ -580,6 +580,11 @@ impl DxfCanvasApp {
               true,
               false,
             )
+            .on_hover_text(if dark {
+              "Светлая тема"
+            } else {
+              "Тёмная тема"
+            })
             .clicked()
             {
               crate::theme::apply(ui.ctx(), !dark);
@@ -593,12 +598,15 @@ impl DxfCanvasApp {
               true,
               self.workspace.help_open,
             )
+            .on_hover_text("Справка · F1")
             .clicked()
             {
               self.workspace.help_open = true;
             }
             if self.updates.available()
-              && icon_button(ui, Icon::Download, "Доступно обновление", false, true, true).clicked()
+              && icon_button(ui, Icon::Download, "Доступно обновление", false, true, true)
+                .on_hover_text("Доступно обновление")
+                .clicked()
             {
               self.updates.open = true;
             }
@@ -653,7 +661,7 @@ impl DxfCanvasApp {
               self.measurements.tool == tool,
             )
             .on_hover_text(format!(
-              "{description}\nEsc — отменить построение; повторно — к выбору"
+              "{label}\n{description}\nEsc — отменить построение; повторно — к выбору"
             ))
             .clicked()
             {
@@ -707,6 +715,7 @@ impl DxfCanvasApp {
               loaded,
               self.workspace.inspector_visible && loaded,
             )
+            .on_hover_text("Показать или скрыть боковую панель")
             .clicked()
             {
               self.workspace.inspector_visible = !self.workspace.inspector_visible;
@@ -797,6 +806,7 @@ impl DxfCanvasApp {
         !self.workspace.file_filter.is_empty(),
         false,
       )
+      .on_hover_text("Сбросить поиск")
       .clicked()
       {
         self.workspace.file_filter.clear();
@@ -927,7 +937,9 @@ impl DxfCanvasApp {
                   ui.label(format!("{:.0}%", item.scale * 100.0));
                 });
                 ui.horizontal(|ui| {
-                  if icon_button(ui, Icon::Minus, "Уменьшить деталь", false, true, false).clicked()
+                  if icon_button(ui, Icon::Minus, "Уменьшить деталь", false, true, false)
+                    .on_hover_text("Уменьшить деталь на холсте")
+                    .clicked()
                   {
                     item.scale = (item.scale / 1.1).max(MIN_ITEM_SCALE);
                     changed = true;
@@ -936,7 +948,9 @@ impl DxfCanvasApp {
                     item.scale = 1.0;
                     changed = true;
                   }
-                  if icon_button(ui, Icon::Plus, "Увеличить деталь", false, true, false).clicked()
+                  if icon_button(ui, Icon::Plus, "Увеличить деталь", false, true, false)
+                    .on_hover_text("Увеличить деталь на холсте")
+                    .clicked()
                   {
                     item.scale = (item.scale * 1.1).min(MAX_ITEM_SCALE);
                     changed = true;

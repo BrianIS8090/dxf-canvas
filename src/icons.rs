@@ -117,7 +117,7 @@ pub fn button(
   #[cfg(test)]
   ui.ctx()
     .data_mut(|data| data.insert_temp(egui::Id::new(("control", label)), response.rect));
-  response.on_hover_text(label)
+  response
 }
 
 #[cfg(test)]
