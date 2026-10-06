@@ -683,15 +683,11 @@ mod tests {
   use eframe::egui::{Pos2, Vec2};
 
   fn imported(drawing: dxf::Drawing) -> DrawingItem {
-    let stamp = std::time::SystemTime::now()
-      .duration_since(std::time::UNIX_EPOCH)
-      .unwrap()
-      .as_nanos();
-    let path = std::env::temp_dir().join(format!("dxf_measurement_{stamp}.dxf"));
+    // Параллельные тесты не должны перезаписывать общий файл при одинаковом времени.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("measurement.dxf");
     drawing.save_file(&path).unwrap();
-    let result = crate::dxf_import::load_dxf(&path).unwrap();
-    std::fs::remove_file(path).unwrap();
-    result
+    crate::dxf_import::load_dxf(&path).unwrap()
   }
 
   #[test]

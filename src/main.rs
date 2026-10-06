@@ -16,6 +16,9 @@ mod display_geometry;
 mod dwg_import;
 mod dxf_import;
 mod dxf_scene;
+mod elevation;
+#[cfg(test)]
+mod elevation_tests;
 mod geometry;
 mod hatch;
 #[cfg(test)]

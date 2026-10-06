@@ -56,6 +56,7 @@ fn dense_diagnostic_markers_do_not_create_unbounded_drawing_commands() {
         detail: "Плотные диагностические маркеры".into(),
       })
       .collect(),
+    ..Default::default()
   };
   let commands = draw_report(&item, &report);
   assert!(

@@ -107,6 +107,7 @@ fn snapshot(item: &DrawingItem) -> DrawingItem {
   DrawingItem {
     rotation: item.rotation,
     appearance: Appearance {
+      elevations: item.appearance.elevations.clone(),
       layers: item.appearance.layers.clone(),
       styles: item.appearance.styles.clone(),
       ..Default::default()

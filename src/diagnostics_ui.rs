@@ -20,6 +20,7 @@ fn color(context: &egui::Context, kind: IssueKind) -> Color32 {
     IssueKind::IncompleteGeometry => Color32::from_rgb(55, 109, 145),
     IssueKind::Intersection => Color32::from_rgb(215, 48, 20),
     IssueKind::PartialOverlap => Color32::from_rgb(174, 42, 170),
+    IssueKind::ZLevel => Color32::from_rgb(20, 109, 210),
   })
 }
 
@@ -97,6 +98,39 @@ pub fn show_file_report(
   selected: Option<usize>,
   filter: Option<IssueKind>,
 ) -> Option<usize> {
+  let elevation = &report.elevation;
+  ui.label(RichText::new(elevation.summary()).small());
+  if !elevation.levels.is_empty() {
+    egui::CollapsingHeader::new("Уровни Z")
+      .id_salt(("z_levels", index))
+      .show(ui, |ui| {
+        ui.label(format!(
+          "Допуск: 0,01 {}. Проверены видимые объекты этого файла.",
+          elevation.unit
+        ));
+        let height = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
+        egui::ScrollArea::vertical()
+          .id_salt(("z_level_rows", index))
+          .max_height(160.0)
+          .show_rows(ui, height, elevation.levels.len(), |ui, rows| {
+            for row in rows {
+              let level = &elevation.levels[row];
+              let text = format!(
+                "Z = {} · {} объектов{}",
+                elevation.format_range(level.range),
+                level.count,
+                if elevation.majority == Some(row) {
+                  " · основной"
+                } else {
+                  ""
+                }
+              );
+              ui.add(egui::Label::new(&text).truncate())
+                .on_hover_text(text);
+            }
+          });
+      });
+  }
   if report.findings.is_empty() {
     ui.label(
       RichText::new("По проверке замечаний нет")
@@ -288,6 +322,7 @@ fn marker_cost(item: &DrawingItem, marker: &Marker) -> usize {
     _ => 16,
   };
   match marker {
+    Marker::Bounds(_) => 64,
     Marker::File => 64,
     Marker::Point(_) => 64,
     Marker::Span(crate::planar::EdgeShape::Arc(_)) => 530,
@@ -320,6 +355,9 @@ fn paint_marker(
   short: bool,
 ) {
   match *marker {
+    Marker::Bounds(bounds) => {
+      paint_path(painter, &bounds.corners(), true, screen, stroke);
+    }
     Marker::Span(shape) => paint_path(painter, &shape.points(), false, screen, stroke),
     Marker::File => {}
     Marker::Point(point) => {
@@ -335,8 +373,14 @@ fn paint_marker(
     }
     Marker::Contour(ref indices) => {
       for index in indices {
-        if let Some(Primitive::Path { points, closed, .. }) = item.primitives.get(*index) {
-          paint_path(painter, points, *closed, screen, stroke);
+        match item.primitives.get(*index) {
+          Some(Primitive::Path { points, closed, .. }) => {
+            paint_path(painter, points, *closed, screen, stroke)
+          }
+          Some(Primitive::Point(point)) => {
+            painter.circle_stroke(screen(*point), 6.0, stroke);
+          }
+          None => {}
         }
       }
     }

@@ -66,6 +66,7 @@ pub struct CadFill {
 
 #[derive(Clone, Debug, Default)]
 pub struct Appearance {
+  pub elevations: Vec<crate::elevation::ElevationObject>,
   pub layers: Vec<Layer>,
   pub styles: Vec<EntityStyle>,
   pub primitive_bounds: Vec<Bounds>,

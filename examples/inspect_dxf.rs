@@ -7,6 +7,8 @@ mod display_geometry;
 #[allow(dead_code)]
 #[path = "../src/dxf_import.rs"]
 mod dxf_import;
+#[path = "../src/elevation.rs"]
+mod elevation;
 #[allow(dead_code)]
 #[path = "../src/geometry.rs"]
 mod geometry;
@@ -20,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let item = dxf_import::load_dxf(std::path::Path::new(&path))?;
     let report = diagnostics::analyze(&item);
     println!("Проверка DXF: {} замечаний", report.findings.len());
+    println!("{}", report.elevation.summary());
     for finding in report.findings {
       println!("  {}: {}", finding.kind.label(), finding.detail);
     }

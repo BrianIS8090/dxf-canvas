@@ -9,6 +9,7 @@ use eframe::egui::Color32;
 use crate::{
   cad_scene::{Appearance, CadFill, CadText, EntityStyle, Layer, indexed_color},
   dxf_import::{Transform2, append_entity},
+  elevation::{ElevationObject, Transform3, ZRange},
   geometry::{Bounds, Point, Primitive},
   raw_dxf::{RawDxf, Record},
 };
@@ -39,6 +40,8 @@ pub fn extract(drawing: &Drawing, raw: &RawDxf) -> (Vec<Primitive>, Appearance, 
     unsupported: 0,
     layer_ids: HashMap::new(),
     mtexts,
+    elevation_transform: Transform3::IDENTITY,
+    block_path: String::new(),
   };
   for layer in drawing.layers() {
     builder.layer(&layer.name);
@@ -53,7 +56,7 @@ pub fn extract(drawing: &Drawing, raw: &RawDxf) -> (Vec<Primitive>, Appearance, 
   for entity in drawing.entities() {
     builder.entity(entity, Transform2::IDENTITY, None, 0, true);
   }
-  builder.extras("", Transform2::IDENTITY, None, 0);
+  builder.extras("", Transform2::IDENTITY, None, 0, true);
   // Дополняем счётчик типами, которые библиотека DXF вообще не передаёт вызывающему коду.
   for (kind, count) in &raw.counts {
     if !matches!(
@@ -169,6 +172,8 @@ pub fn extract(drawing: &Drawing, raw: &RawDxf) -> (Vec<Primitive>, Appearance, 
 }
 
 struct Builder<'a> {
+  elevation_transform: Transform3,
+  block_path: String,
   drawing: &'a Drawing,
   raw: &'a RawDxf,
   mtexts: HashMap<usize, &'a Record>,
@@ -314,6 +319,12 @@ impl Builder<'_> {
       return;
     }
     let style = self.style(&entity.common, parent, diagnostic);
+    let elevation_style = style.clone();
+    let starts = (
+      self.geometry.len(),
+      self.appearance.texts.len(),
+      self.appearance.fills.len(),
+    );
     match &entity.specific {
       EntityType::Insert(insert) => {
         if let Some(block) = self
@@ -353,7 +364,20 @@ impl Builder<'_> {
                   insert.location.z,
                 ))
                 .then(local);
+              let previous_transform = self.elevation_transform;
+              self.elevation_transform =
+                previous_transform.then(Transform3::insert(insert, &block.base_point, row, column));
+              let previous_path = self.block_path.clone();
+              self.block_path = format!(
+                "{previous_path}/{}#{:X}[{},{}]",
+                insert.name,
+                entity.common.handle.0,
+                row + 1,
+                column + 1
+              );
               self.block(&insert.name, combined, &style, depth + 1, diagnostic);
+              self.elevation_transform = previous_transform;
+              self.block_path = previous_path;
             }
           }
           for attribute in insert.attributes() {
@@ -583,6 +607,44 @@ impl Builder<'_> {
           .extend((start..self.geometry.len()).map(|_| style.clone()));
       }
     }
+    if diagnostic && let Some(kind) = crate::elevation::entity_name(entity) {
+      self.record_elevation(
+        format!("{kind} #{:X}{}", entity.common.handle.0, self.block_path),
+        crate::elevation::entity_range(entity, self.elevation_transform),
+        elevation_style,
+        starts,
+      );
+    }
+  }
+
+  fn record_elevation(
+    &mut self,
+    source: String,
+    range: Option<ZRange>,
+    style: EntityStyle,
+    starts: (usize, usize, usize),
+  ) {
+    let mut bounds = Bounds::empty();
+    for primitive in &self.geometry[starts.0..] {
+      if let Some(value) = primitive.bounds() {
+        bounds.include_bounds(value);
+      }
+    }
+    for text in &self.appearance.texts[starts.1..] {
+      bounds.include_bounds(text.bounds);
+    }
+    for fill in &self.appearance.fills[starts.2..] {
+      bounds.include_bounds(fill.bounds);
+    }
+    if bounds.is_valid() {
+      self.appearance.elevations.push(ElevationObject {
+        source,
+        range,
+        style,
+        bounds,
+        primitives: starts.0..self.geometry.len(),
+      });
+    }
   }
 
   fn block(
@@ -601,7 +663,7 @@ impl Builder<'_> {
       for child in &block.entities {
         self.entity(child, transform, Some(style), depth, diagnostic);
       }
-      self.extras(name, transform, Some(style), depth);
+      self.extras(name, transform, Some(style), depth, diagnostic);
     } else {
       self.warning(&format!("Отсутствует блок {}", name));
     }
@@ -729,6 +791,7 @@ impl Builder<'_> {
     transform: Transform2,
     parent: Option<&EntityStyle>,
     depth: usize,
+    diagnostic: bool,
   ) {
     let Some(records) = self.raw.extras.get(block) else {
       return;
@@ -762,6 +825,30 @@ impl Builder<'_> {
       let result = crate::hatch::decode(record);
       match result {
         Ok(hatch) => {
+          let starts = (
+            self.geometry.len(),
+            self.appearance.texts.len(),
+            self.appearance.fills.len(),
+          );
+          let elevation_style = style.clone();
+          let elevation_transform =
+            self
+              .elevation_transform
+              .then(Transform3::ocs(&dxf::Vector::new(
+                record.number(210, 0.0),
+                record.number(220, 0.0),
+                record.number(230, 1.0),
+              )));
+          let mut elevation = ZRange::values(
+            hatch
+              .loops
+              .iter()
+              .flatten()
+              .map(|p| elevation_transform.z(&dxf::Point::new(p.x, p.y, record.number(30, 0.0)))),
+          );
+          if let Some(range) = &mut elevation {
+            range.approximate = range.max - range.min > 1e-9;
+          }
           let combined = transform.then(Transform2::ocs(
             &dxf::Vector::new(
               record.number(210, 0.0),
@@ -800,6 +887,18 @@ impl Builder<'_> {
               }
               Err(error) => self.warning(&error),
             }
+          }
+          if diagnostic {
+            self.record_elevation(
+              format!(
+                "HATCH #{}{}",
+                record.text(5).unwrap_or("?"),
+                self.block_path
+              ),
+              elevation,
+              elevation_style,
+              starts,
+            );
           }
         }
         Err(error) => self.warning(&error),

@@ -17,10 +17,11 @@ pub enum IssueKind {
   IncompleteGeometry,
   Intersection,
   PartialOverlap,
+  ZLevel,
 }
 
 impl IssueKind {
-  pub const ALL: [Self; 9] = [
+  pub const ALL: [Self; 10] = [
     Self::OpenContour,
     Self::UnjoinedContour,
     Self::Duplicate,
@@ -30,6 +31,7 @@ impl IssueKind {
     Self::IncompleteGeometry,
     Self::Intersection,
     Self::PartialOverlap,
+    Self::ZLevel,
   ];
 
   pub fn label(self) -> &'static str {
@@ -43,11 +45,15 @@ impl IssueKind {
       Self::IncompleteGeometry => "Неполная геометрия",
       Self::Intersection => "Пересечения / самопересечения",
       Self::PartialOverlap => "Частичные наложения",
+      Self::ZLevel => "Разные уровни Z",
     }
   }
 
   pub fn explanation(self) -> &'static str {
     match self {
+      Self::ZLevel => {
+        "Высоты видимых объектов внутри одного файла с допуском 0,01 мм. Основной уровень содержит больше половины объектов. Вложенные блоки учитываются с переносом, масштабом и нормалью; одна штриховка — один объект. Для текста проверяется точка размещения, для сплайна — диапазон опорных точек. Графика размеров не участвует. Исходник не изменяется."
+      }
       Self::OpenContour => {
         "Конец не соединён с другим концом в этом файле. Это может быть разрыв или намеренно открытая линия."
       }
@@ -81,6 +87,7 @@ impl IssueKind {
 
 #[derive(Clone, Debug)]
 pub enum Marker {
+  Bounds(Bounds),
   Point(Point),
   Curve { primitive: usize, curve: usize },
   Primitive(usize),
@@ -92,6 +99,7 @@ pub enum Marker {
 impl Marker {
   pub fn bounds(&self, item: &DrawingItem) -> Option<Bounds> {
     match self {
+      Self::Bounds(bounds) => bounds.is_valid().then_some(*bounds),
       Self::Span(shape) => Some(shape.bounds()),
       Self::Point(point) => Bounds::from_points([*point]),
       Self::Primitive(index) => item.primitives.get(*index)?.bounds(),
@@ -160,6 +168,7 @@ pub struct Finding {
 #[derive(Clone, Debug, Default)]
 pub struct DiagnosticReport {
   pub findings: Vec<Finding>,
+  pub elevation: crate::elevation::ElevationReport,
 }
 
 impl DiagnosticReport {
@@ -171,7 +180,7 @@ impl DiagnosticReport {
       .count()
   }
 
-  fn add(&mut self, kind: IssueKind, marker: Marker, detail: String) {
+  pub(crate) fn add(&mut self, kind: IssueKind, marker: Marker, detail: String) {
     self.findings.push(Finding {
       kind,
       marker,
@@ -320,6 +329,7 @@ struct CurveRef<'a> {
 
 pub fn analyze(item: &DrawingItem) -> DiagnosticReport {
   let mut report = DiagnosticReport::default();
+  crate::elevation::analyze(item, &mut report);
   let factor = item.units.factor();
   let join_tolerance = JOIN_TOLERANCE / factor;
   let duplicate_tolerance = DUPLICATE_TOLERANCE / factor;

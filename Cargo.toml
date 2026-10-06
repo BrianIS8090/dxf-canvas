@@ -1,6 +1,6 @@
 [package]
 name = "dxf-canvas"
-version = "0.9.7"
+version = "0.9.8"
 edition = "2024"
 description = "Просмотрщик DXF и DWG для Windows: общий холст, слои, измерения и диагностика геометрии"
 license = "MIT"

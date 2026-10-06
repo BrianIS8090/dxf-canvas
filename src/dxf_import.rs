@@ -410,7 +410,7 @@ fn push_bulged_polyline(
   }
 }
 
-fn bulge_round(start: Point, end: Point, bulge: f64) -> Option<RoundCurve> {
+pub(crate) fn bulge_round(start: Point, end: Point, bulge: f64) -> Option<RoundCurve> {
   let dx = end.x - start.x;
   let dy = end.y - start.y;
   let chord = dx.hypot(dy);

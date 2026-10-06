@@ -5,12 +5,16 @@ mod cad_render;
 mod cad_scene;
 #[path = "../src/cad_text.rs"]
 mod cad_text;
+#[path = "../src/diagnostics.rs"]
+mod diagnostics;
 #[path = "../src/display_geometry.rs"]
 mod display_geometry;
 #[path = "../src/dxf_import.rs"]
 mod dxf_import;
 #[path = "../src/dxf_scene.rs"]
 mod dxf_scene;
+#[path = "../src/elevation.rs"]
+mod elevation;
 #[path = "../src/geometry.rs"]
 mod geometry;
 #[path = "../src/hatch.rs"]
