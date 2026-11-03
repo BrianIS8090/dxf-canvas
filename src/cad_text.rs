@@ -4,6 +4,39 @@ use eframe::egui::{Color32, FontId, TextFormat, text::LayoutJob};
 #[path = "cad_fonts.rs"]
 pub mod fonts;
 
+// Общие параметры строки, созданной конвертером из сохранённого текста DWG.
+pub fn proxy_parameters(source: &str) -> (f64, f64, f64) {
+  let mut rest = source;
+  let mut width = 1.0;
+  let mut tracking = 1.0;
+  let mut oblique = 0.0;
+  while let Some(command) = rest.strip_prefix('\\') {
+    let Some(kind) = command.chars().next() else {
+      break;
+    };
+    if !matches!(kind, 'T' | 'W' | 'Q') {
+      break;
+    }
+    let Some((value, tail)) = command[1..].split_once(';') else {
+      break;
+    };
+    let Ok(value) = value.parse::<f64>() else {
+      break;
+    };
+    if !value.is_finite() {
+      break;
+    }
+    match kind {
+      'T' if value > 0.0 && value <= 10.0 => tracking = value,
+      'W' if value > 0.0 && value <= 100.0 => width = value,
+      'Q' if value.abs() < 85.0 => oblique = value.to_radians().tan(),
+      _ => break,
+    }
+    rest = tail;
+  }
+  (width, tracking, oblique)
+}
+
 #[derive(Clone, Debug)]
 struct Format {
   scale: f32,
@@ -175,6 +208,15 @@ pub fn layout_with_font(
 #[cfg(test)]
 mod tests {
   use super::*;
+  #[test]
+  fn proxy_line_parameters_preserve_width_tracking_and_slant() {
+    assert_eq!(
+      proxy_parameters("\\T0.75;\\W0.8;\\Q0;Строка"),
+      (0.8, 0.75, 0.0)
+    );
+    assert_eq!(proxy_parameters("обычный текст \\W2;"), (1.0, 1.0, 0.0));
+    assert_eq!(proxy_parameters("\\WNaN;"), (1.0, 1.0, 0.0));
+  }
   #[test]
   fn cad_formatting_does_not_leak_into_the_displayed_text() {
     assert_eq!(

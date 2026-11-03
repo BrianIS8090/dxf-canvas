@@ -5,6 +5,7 @@ use crate::{
   raw_dxf::Record,
 };
 
+#[derive(Clone, Debug)]
 pub struct Hatch {
   pub loops: Vec<Vec<Point>>,
   pub solid: bool,
@@ -12,11 +13,180 @@ pub struct Hatch {
   pub patterns: Vec<Pattern>,
 }
 
+#[derive(Clone, Debug)]
 pub struct Pattern {
   pub angle: f64,
   pub base: Point,
   pub offset: Point,
   pub dashes: Vec<f64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PatternHatch {
+  pub source: Hatch,
+  patterns: Vec<WindowPattern>,
+}
+
+#[derive(Clone, Debug)]
+struct WindowPattern {
+  sin: f64,
+  cos: f64,
+  step: f64,
+  offset_x: f64,
+  period: f64,
+  rings: Vec<Vec<Point>>,
+  bounds: Bounds,
+  edge_count: usize,
+}
+
+pub struct PatternBudget {
+  pub segments: usize,
+  pub work: usize,
+}
+
+impl PatternBudget {
+  fn spend(&mut self, amount: usize) -> bool {
+    if amount > self.work {
+      self.work = 0;
+      return false;
+    }
+    self.work -= amount;
+    true
+  }
+}
+
+impl PatternHatch {
+  // None означает обзорный режим: ни частичный рисунок, ни непроверенный результат не выдаются.
+  pub fn lines_in_view(
+    &self,
+    window: [Point; 4],
+    budget: &mut PatternBudget,
+  ) -> Option<Vec<[Point; 2]>> {
+    if window.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+      return None;
+    }
+    let mut result = Vec::new();
+    for (pattern, prepared) in self.source.patterns.iter().zip(&self.patterns) {
+      let project = |p: Point| {
+        Point::new(
+          (p.x - pattern.base.x) * prepared.cos + (p.y - pattern.base.y) * prepared.sin,
+          -(p.x - pattern.base.x) * prepared.sin + (p.y - pattern.base.y) * prepared.cos,
+        )
+      };
+      let clip = window.map(project);
+      let bounds = Bounds::from_points(clip)?;
+      let min_y = bounds.min.y.max(prepared.bounds.min.y);
+      let max_y = bounds.max.y.min(prepared.bounds.max.y);
+      if min_y > max_y {
+        continue;
+      }
+      let first = (min_y / prepared.step).min(max_y / prepared.step).ceil();
+      let last = (min_y / prepared.step).max(max_y / prepared.step).floor();
+      if !first.is_finite()
+        || !last.is_finite()
+        || first.abs().max(last.abs()) > (1_u64 << 53) as f64
+      {
+        return None;
+      }
+      if first > last {
+        continue;
+      }
+      let rows = (last - first + 1.0) as usize;
+      if rows > budget.work / prepared.edge_count.saturating_add(4).max(1) {
+        return None;
+      }
+      for row in first as i64..=last as i64 {
+        if !budget.spend(prepared.edge_count + 4) {
+          return None;
+        }
+        let y = row as f64 * prepared.step;
+        let mut clip_hits = Vec::with_capacity(4);
+        intersections(&clip, y, &mut clip_hits);
+        if clip_hits.len() < 2 {
+          continue;
+        }
+        clip_hits.sort_by(f64::total_cmp);
+        let left = clip_hits[0];
+        let right = *clip_hits.last()?;
+        let mut hits = Vec::new();
+        for ring in &prepared.rings {
+          intersections(ring, y, &mut hits);
+        }
+        hits.sort_by(f64::total_cmp);
+        let unproject = |x: f64| {
+          Point::new(
+            pattern.base.x + x * prepared.cos - y * prepared.sin,
+            pattern.base.y + x * prepared.sin + y * prepared.cos,
+          )
+        };
+        let mut emit = |a: f64, b: f64| -> Option<()> {
+          if budget.segments == 0 {
+            return None;
+          }
+          let segment = [unproject(a), unproject(b)];
+          if segment.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+            return None;
+          }
+          budget.segments -= 1;
+          result.push(segment);
+          Some(())
+        };
+        for pair in hits.as_chunks::<2>().0 {
+          let a = pair[0].max(left);
+          let b = pair[1].min(right);
+          if a >= b {
+            continue;
+          }
+          if pattern.dashes.is_empty() {
+            emit(a, b)?;
+            continue;
+          }
+          // Фаза берётся из исходной строки, а не из левого края текущего окна.
+          let phase = (row as f64 * prepared.offset_x).rem_euclid(prepared.period);
+          let first_cycle = ((a - phase) / prepared.period).floor();
+          let last_cycle = ((b - phase) / prepared.period).ceil() - 1.0;
+          if !first_cycle.is_finite()
+            || !last_cycle.is_finite()
+            || first_cycle.abs().max(last_cycle.abs()) > (1_u64 << 53) as f64
+          {
+            return None;
+          }
+          let cycles = (last_cycle - first_cycle + 1.0) as usize;
+          let operations = cycles.checked_mul(pattern.dashes.len())?;
+          if operations > budget.work {
+            return None;
+          }
+          budget.work -= operations;
+          for cycle in first_cycle as i64..=last_cycle as i64 {
+            let mut x = phase + cycle as f64 * prepared.period;
+            for dash in &pattern.dashes {
+              let next = x + dash.abs();
+              if *dash >= 0.0 && next >= a && x <= b {
+                emit(x.max(a), next.min(b))?;
+              }
+              if *dash != 0.0 && next <= x {
+                return None;
+              }
+              x = next;
+            }
+          }
+        }
+      }
+    }
+    Some(result)
+  }
+}
+
+fn intersections(ring: &[Point], y: f64, hits: &mut Vec<f64>) {
+  for (a, b) in ring
+    .iter()
+    .zip(ring.iter().cycle().skip(1))
+    .take(ring.len())
+  {
+    if (a.y > y) != (b.y > y) {
+      hits.push(a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y));
+    }
+  }
 }
 
 fn xy(record: &Record, code: i16) -> Point {
@@ -63,9 +233,25 @@ pub fn decode(record: &Record) -> Result<Hatch, String> {
     }
     if points.len() >= 3 {
       loops.push(points);
+    } else if !(path.integer(92, 0) & 2 != 0
+      && path.integer(73, 0) == 1
+      && path.integer(93, 0) == 2
+      && path
+        .pairs
+        .iter()
+        .filter(|(code, _)| matches!(*code, 10 | 20))
+        .all(|(_, value)| value.trim().parse::<f64>().is_ok_and(f64::is_finite))
+      && path
+        .pairs
+        .iter()
+        .filter(|(code, _)| *code == 42)
+        .all(|(_, value)| value.trim().parse::<f64>() == Ok(0.0)))
+    {
+      return Err("Не удалось восстановить все границы штриховки".to_owned());
     }
   }
-  if starts.len() != record.integer(91, 0) as usize || loops.len() != starts.len() {
+  // Замкнутый отрезок A→B→A имеет нулевую площадь: он не вырезает отверстие и не отменяет внешний контур.
+  if starts.is_empty() || starts.len() != record.integer(91, 0) as usize {
     return Err("Не удалось восстановить все границы штриховки".to_owned());
   }
   let mut patterns = Vec::new();
@@ -253,6 +439,88 @@ fn contains(ring: &[Point], point: Point) -> bool {
 }
 
 impl Hatch {
+  pub fn exceeds_eager_limit(error: &str) -> bool {
+    matches!(
+      error,
+      "Слишком плотная штриховка (более 100 000 линий)" | "Слишком много штрихов в одной штриховке"
+    )
+  }
+
+  pub fn prepare_view(&self) -> Result<PatternHatch, String> {
+    let depths = Self::depths(&self.parents());
+    let rings: Vec<_> = self
+      .loops
+      .iter()
+      .enumerate()
+      .filter(|(i, _)| match self.style {
+        1 => depths[*i] <= 1,
+        2 => depths[*i] == 0,
+        _ => true,
+      })
+      .map(|(_, ring)| ring)
+      .collect();
+    let mut patterns = Vec::new();
+    for pattern in &self.patterns {
+      if ![
+        pattern.angle,
+        pattern.base.x,
+        pattern.base.y,
+        pattern.offset.x,
+        pattern.offset.y,
+      ]
+      .iter()
+      .all(|v| v.is_finite())
+        || pattern.dashes.iter().any(|v| !v.is_finite())
+      {
+        return Err("Неконечные параметры штриховки".to_owned());
+      }
+      let (sin, cos) = pattern.angle.sin_cos();
+      let step = -pattern.offset.x * sin + pattern.offset.y * cos;
+      let period: f64 = pattern.dashes.iter().map(|v| v.abs()).sum();
+      if step.abs() < 1e-9 || (!pattern.dashes.is_empty() && period < 1e-9) {
+        return Err("Нулевой шаг или период штриховки".to_owned());
+      }
+      let projected: Vec<Vec<_>> = rings
+        .iter()
+        .map(|ring| {
+          ring
+            .iter()
+            .map(|p| {
+              Point::new(
+                (p.x - pattern.base.x) * cos + (p.y - pattern.base.y) * sin,
+                -(p.x - pattern.base.x) * sin + (p.y - pattern.base.y) * cos,
+              )
+            })
+            .collect()
+        })
+        .collect();
+      if projected
+        .iter()
+        .flatten()
+        .any(|p| !p.x.is_finite() || !p.y.is_finite())
+      {
+        return Err("Неконечная граница штриховки".to_owned());
+      }
+      let bounds =
+        Bounds::from_points(projected.iter().flatten().copied()).ok_or("Пустая штриховка")?;
+      let edge_count = projected.iter().map(Vec::len).sum();
+      patterns.push(WindowPattern {
+        sin,
+        cos,
+        step,
+        offset_x: pattern.offset.x * cos + pattern.offset.y * sin,
+        period,
+        rings: projected,
+        bounds,
+        edge_count,
+      });
+    }
+    Ok(PatternHatch {
+      source: self.clone(),
+      patterns,
+    })
+  }
+
   fn parents(&self) -> Vec<Option<usize>> {
     let areas: Vec<_> = self
       .loops
@@ -320,6 +588,9 @@ impl Hatch {
   }
 
   pub fn lines(&self) -> Result<Vec<[Point; 2]>, String> {
+    if self.loops.is_empty() {
+      return Ok(Vec::new());
+    }
     let parents = self.parents();
     let depths = Self::depths(&parents);
     let rings: Vec<_> = self
@@ -334,7 +605,12 @@ impl Hatch {
       .map(|(_, ring)| ring)
       .collect();
     let mut result = Vec::new();
+    let mut remaining_work = 2_000_000_usize;
     for pattern in &self.patterns {
+      // Полностью отрицательное определение состоит только из пробелов и ничего не рисует.
+      if !pattern.dashes.is_empty() && pattern.dashes.iter().all(|dash| *dash < 0.0) {
+        continue;
+      }
       let (sin, cos) = pattern.angle.sin_cos();
       let project = |point: Point| {
         Point::new(
@@ -358,7 +634,16 @@ impl Hatch {
       if last.saturating_sub(first) > 100_000 {
         return Err("Слишком плотная штриховка (более 100 000 линий)".to_owned());
       }
+      let row_work = projected
+        .iter()
+        .map(Vec::len)
+        .sum::<usize>()
+        .saturating_add(1);
       for row in first..=last {
+        if row_work > remaining_work {
+          return Err("Слишком много штрихов в одной штриховке".to_owned());
+        }
+        remaining_work -= row_work;
         let y = row as f64 * step;
         let mut hits = Vec::new();
         for ring in &projected {
@@ -382,6 +667,9 @@ impl Hatch {
           };
           if pattern.dashes.is_empty() {
             result.push([unproject(pair[0]), unproject(pair[1])]);
+            if result.len() > 200_000 {
+              return Err("Слишком много штрихов в одной штриховке".to_owned());
+            }
           } else {
             let period: f64 = pattern.dashes.iter().map(|value| value.abs()).sum();
             if period < 1.0e-9 {
@@ -391,7 +679,15 @@ impl Hatch {
             let mut x = origin + ((pair[0] - origin) / period).floor() * period;
             while x < pair[1] {
               for dash in &pattern.dashes {
+                if remaining_work == 0 {
+                  return Err("Слишком много штрихов в одной штриховке".to_owned());
+                }
+                remaining_work -= 1;
                 let next = x + dash.abs();
+                // Ненулевой шаг обязан продвигать координату и после округления f64.
+                if *dash != 0.0 && next <= x {
+                  return Err("Слишком много штрихов в одной штриховке".to_owned());
+                }
                 if *dash >= 0.0 && next >= pair[0] && x <= pair[1] {
                   result.push([unproject(x.max(pair[0])), unproject(next.min(pair[1]))]);
                 }
@@ -412,6 +708,389 @@ impl Hatch {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn eager_negative_pattern_and_stalled_float_steps_finish_within_a_bound() {
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+      let source = |start: f64, dashes: Vec<f64>| Hatch {
+        loops: vec![vec![
+          Point::new(start, 0.0),
+          Point::new(start + 100.0, 0.0),
+          Point::new(start + 100.0, 1.0),
+          Point::new(start, 1.0),
+        ]],
+        solid: false,
+        style: 0,
+        patterns: vec![Pattern {
+          angle: 0.0,
+          base: Point::default(),
+          offset: Point::new(0.0, 2.0),
+          dashes,
+        }],
+      };
+      let empty = source(1e16, vec![-1.0]).lines();
+      let stalled = source(1e16, vec![1.0, -1.0]).lines();
+      let _ = send.send((empty, stalled));
+    });
+    let (empty, stalled) = receive
+      .recv_timeout(std::time::Duration::from_secs(1))
+      .expect(
+        "Построение не завершилось: пустой рисунок или непродвигающийся шаг зациклили импорт",
+      );
+    assert!(empty.unwrap().is_empty());
+    assert!(Hatch::exceeds_eager_limit(&stalled.unwrap_err()));
+  }
+
+  #[test]
+  fn eager_work_budget_limits_gap_traversal_before_the_output_limit() {
+    let mut dashes = vec![-1.0; 2048];
+    dashes.push(1.0);
+    let source = Hatch {
+      loops: vec![vec![
+        Point::new(0.0, 0.0),
+        Point::new(10_000_000.0, 0.0),
+        Point::new(10_000_000.0, 1.0),
+        Point::new(0.0, 1.0),
+      ]],
+      solid: false,
+      style: 0,
+      patterns: vec![Pattern {
+        angle: 0.0,
+        base: Point::default(),
+        offset: Point::new(0.0, 2.0),
+        dashes,
+      }],
+    };
+    // Видимых отрезков меньше 5000; ограничиться только result.len() недостаточно.
+    assert!(Hatch::exceeds_eager_limit(&source.lines().unwrap_err()));
+    let prepared = source.prepare_view().unwrap();
+    let mut budget = PatternBudget {
+      segments: 10,
+      work: 10_000,
+    };
+    let detail = prepared
+      .lines_in_view(
+        Bounds {
+          min: Point::new(2047.0, -0.5),
+          max: Point::new(2050.0, 0.5),
+        }
+        .corners(),
+        &mut budget,
+      )
+      .unwrap();
+    assert_eq!(detail, [[Point::new(2048.0, 0.0), Point::new(2049.0, 0.0)]]);
+  }
+  fn window_hatch() -> Hatch {
+    Hatch {
+      loops: vec![
+        vec![
+          Point::new(0.0, 0.0),
+          Point::new(100.0, 0.0),
+          Point::new(100.0, 100.0),
+          Point::new(0.0, 100.0),
+        ],
+        vec![
+          Point::new(4.0, 4.0),
+          Point::new(6.0, 4.0),
+          Point::new(6.0, 6.0),
+          Point::new(4.0, 6.0),
+        ],
+      ],
+      solid: false,
+      style: 0,
+      patterns: vec![Pattern {
+        angle: 0.0,
+        base: Point::new(1.0, 0.0),
+        offset: Point::new(1.0, 2.0),
+        dashes: vec![2.0, -3.0],
+      }],
+    }
+  }
+
+  #[test]
+  fn view_window_preserves_dash_phase_and_holes_when_panning() {
+    let geometry = window_hatch().prepare_view().unwrap();
+    let window = Bounds {
+      min: Point::new(3.0, 3.0),
+      max: Point::new(8.5, 8.5),
+    };
+    let mut budget = PatternBudget {
+      segments: 100,
+      work: 1000,
+    };
+    let actual = geometry
+      .lines_in_view(window.corners(), &mut budget)
+      .unwrap();
+    assert_eq!(
+      actual,
+      vec![
+        [Point::new(3.0, 4.0), Point::new(4.0, 4.0)],
+        [Point::new(8.0, 4.0), Point::new(8.5, 4.0)],
+        [Point::new(4.0, 6.0), Point::new(6.0, 6.0)],
+        [Point::new(5.0, 8.0), Point::new(7.0, 8.0)]
+      ]
+    );
+    let shifted = Bounds {
+      min: Point::new(3.5, 3.0),
+      ..window
+    };
+    let mut budget = PatternBudget {
+      segments: 100,
+      work: 1000,
+    };
+    let panned = geometry
+      .lines_in_view(shifted.corners(), &mut budget)
+      .unwrap();
+    assert_eq!(panned[0], [Point::new(3.5, 4.0), Point::new(4.0, 4.0)]);
+    assert_eq!(panned[1..], actual[1..]);
+  }
+
+  #[test]
+  fn view_window_budget_prevents_full_materialization_and_nonfinite_windows() {
+    let mut source = window_hatch();
+    source.patterns[0].offset = Point::new(0.0, 0.0001);
+    source.patterns[0].dashes = vec![0.0001, -0.0001];
+    let geometry = source.prepare_view().unwrap();
+    let mut budget = PatternBudget {
+      segments: 100,
+      work: 1000,
+    };
+    assert!(
+      geometry
+        .lines_in_view(
+          Bounds {
+            min: Point::new(0.0, 0.0),
+            max: Point::new(100.0, 100.0)
+          }
+          .corners(),
+          &mut budget
+        )
+        .is_none()
+    );
+    assert!(budget.segments <= 100 && budget.work <= 1000);
+    assert!(
+      geometry
+        .lines_in_view([Point::new(f64::INFINITY, 0.0); 4], &mut budget)
+        .is_none()
+    );
+    let mut budget = PatternBudget {
+      segments: 100,
+      work: 1000,
+    };
+    let detail = geometry
+      .lines_in_view(
+        Bounds {
+          min: Point::new(0.0, 0.0),
+          max: Point::new(0.0005, 0.0005),
+        }
+        .corners(),
+        &mut budget,
+      )
+      .unwrap();
+    assert!(!detail.is_empty() && detail.len() <= 100);
+  }
+
+  #[test]
+  fn rotated_window_and_negative_step_keep_exact_clipping() {
+    let mut source = window_hatch();
+    source.patterns[0].offset.y = -2.0;
+    let prepared = source.prepare_view().unwrap();
+    let bounds = Bounds {
+      min: Point::new(3.0, 3.0),
+      max: Point::new(8.5, 8.5),
+    };
+    let mut budget = PatternBudget {
+      segments: 1000,
+      work: 10000,
+    };
+    let actual = prepared
+      .lines_in_view(bounds.corners(), &mut budget)
+      .unwrap();
+    let expected: Vec<_> = source
+      .lines()
+      .unwrap()
+      .into_iter()
+      .filter_map(|line| {
+        if line[0].y < 3.0 || line[0].y >= 8.5 {
+          return None;
+        }
+        let a = line[0].x.max(3.0);
+        let b = line[1].x.min(8.5);
+        (a <= b).then_some([Point::new(a, line[0].y), Point::new(b, line[1].y)])
+      })
+      .collect();
+    assert_eq!(actual, expected);
+    let diamond = [
+      Point::new(0.0, 5.0),
+      Point::new(5.0, 0.0),
+      Point::new(10.0, 5.0),
+      Point::new(5.0, 10.0),
+    ];
+    let mut budget = PatternBudget {
+      segments: 1000,
+      work: 10000,
+    };
+    let clipped = prepared.lines_in_view(diamond, &mut budget).unwrap();
+    assert!(!clipped.is_empty());
+    for line in clipped {
+      assert!(
+        line
+          .iter()
+          .all(|p| (p.x - 5.0).abs() + (p.y - 5.0).abs() <= 5.0 + 1e-9)
+      );
+      let midpoint = Point::new((line[0].x + line[1].x) * 0.5, line[0].y);
+      assert!(!(midpoint.x > 4.0 && midpoint.x < 6.0 && midpoint.y > 4.0 && midpoint.y < 6.0));
+    }
+  }
+
+  #[test]
+  fn two_vertex_zero_area_loop_does_not_discard_the_outer_boundary() {
+    let text = concat!(
+      "0\nSECTION\n2\nENTITIES\n0\nHATCH\n70\n0\n91\n2\n",
+      "92\n2\n72\n0\n73\n1\n93\n4\n10\n0\n20\n0\n10\n10\n20\n0\n10\n10\n20\n10\n10\n0\n20\n10\n97\n0\n",
+      "92\n2\n72\n0\n73\n1\n93\n2\n10\n2\n20\n5\n10\n8\n20\n5\n97\n0\n",
+      "75\n0\n78\n1\n53\n0\n43\n0\n44\n5\n45\n0\n46\n20\n79\n0\n0\nENDSEC\n0\nEOF\n"
+    );
+    let raw = crate::raw_dxf::RawDxf::parse(text);
+    let hatch = decode(&raw.extras[""][0]).unwrap();
+    assert_eq!(hatch.loops.len(), 1);
+    assert_eq!(
+      hatch.lines().unwrap(),
+      [[Point::new(0.0, 5.0), Point::new(10.0, 5.0)]]
+    );
+  }
+
+  #[test]
+  fn standalone_two_vertex_zero_area_hatch_has_no_visible_lines() {
+    let text = concat!(
+      "0\nSECTION\n2\nENTITIES\n0\nHATCH\n70\n0\n91\n1\n",
+      "92\n2\n72\n0\n73\n1\n93\n2\n10\n2\n20\n5\n10\n8\n20\n5\n97\n0\n",
+      "75\n0\n78\n1\n53\n0\n43\n0\n44\n5\n45\n0\n46\n20\n79\n0\n0\nENDSEC\n0\nEOF\n"
+    );
+    let raw = crate::raw_dxf::RawDxf::parse(text);
+    assert!(
+      decode(&raw.extras[""][0])
+        .unwrap()
+        .lines()
+        .unwrap()
+        .is_empty()
+    );
+    let mut open = raw.extras[""][0].clone();
+    open
+      .pairs
+      .iter_mut()
+      .find(|(code, _)| *code == 73)
+      .unwrap()
+      .1 = "0".to_owned();
+    assert!(decode(&open).is_err());
+    let mut invalid = raw.extras[""][0].clone();
+    invalid
+      .pairs
+      .iter_mut()
+      .find(|(code, _)| *code == 10)
+      .unwrap()
+      .1 = "NaN".to_owned();
+    assert!(decode(&invalid).is_err());
+  }
+
+  #[test]
+  fn two_vertex_bulged_circle_is_preserved_and_missing_paths_still_fail() {
+    let text = concat!(
+      "0\nSECTION\n2\nENTITIES\n0\nHATCH\n70\n1\n91\n1\n",
+      "92\n2\n72\n1\n73\n1\n93\n2\n10\n-1\n20\n0\n42\n1\n10\n1\n20\n0\n42\n1\n97\n0\n",
+      "75\n0\n0\nENDSEC\n0\nEOF\n"
+    );
+    let raw = crate::raw_dxf::RawDxf::parse(text);
+    let record = &raw.extras[""][0];
+    let hatch = decode(record).unwrap();
+    assert_eq!(hatch.loops.len(), 1);
+    assert!((signed_area(&hatch.loops[0]).abs() - std::f64::consts::PI).abs() < 0.02);
+    let mut missing = record.clone();
+    missing
+      .pairs
+      .iter_mut()
+      .find(|(code, _)| *code == 91)
+      .unwrap()
+      .1 = "2".to_owned();
+    assert!(decode(&missing).is_err());
+  }
+
+  #[test]
+  #[ignore = "Требует локальной папки DXF_CANVAS_HATCH_AUDIT_DIR с частными DXF"]
+  fn audit_private_hatch_failures() {
+    let directory = std::env::var("DXF_CANVAS_HATCH_AUDIT_DIR").unwrap();
+    for index in 0..5 {
+      let path = std::path::Path::new(&directory).join(format!("{index}.dxf"));
+      let text = std::fs::read_to_string(path).unwrap();
+      let raw = crate::raw_dxf::RawDxf::parse(&text);
+      for record in raw.extras.values().flatten().filter(|r| r.kind == "HATCH") {
+        match decode(record) {
+          Err(error) => println!(
+            "HATCH_AUDIT {index} {} decode: {error}",
+            record.text(5).unwrap_or("?")
+          ),
+          Ok(hatch) if !hatch.solid => {
+            if let Err(error) = hatch.lines() {
+              println!(
+                "HATCH_AUDIT {index} {} lines: {error}; loops={} vertices={}",
+                record.text(5).unwrap_or("?"),
+                hatch.loops.len(),
+                hatch.loops.iter().map(Vec::len).sum::<usize>()
+              );
+              let depths = Hatch::depths(&hatch.parents());
+              let area: f64 = hatch
+                .loops
+                .iter()
+                .enumerate()
+                .map(|(i, ring)| {
+                  let area = signed_area(ring).abs();
+                  match hatch.style {
+                    1 if depths[i] > 1 => 0.0,
+                    2 if depths[i] > 0 => 0.0,
+                    _ if !depths[i].is_multiple_of(2) => -area,
+                    _ => area,
+                  }
+                })
+                .sum();
+              let mut estimate = 0.0;
+              for p in &hatch.patterns {
+                let (s, c) = p.angle.sin_cos();
+                let bounds = Bounds::from_points(hatch.loops.iter().flatten().map(|v| {
+                  Point::new(
+                    (v.x - p.base.x) * c + (v.y - p.base.y) * s,
+                    -(v.x - p.base.x) * s + (v.y - p.base.y) * c,
+                  )
+                }))
+                .unwrap();
+                let step = -p.offset.x * s + p.offset.y * c;
+                let period: f64 = p.dashes.iter().map(|d| d.abs()).sum();
+                if period > 0.0 {
+                  estimate += area * p.dashes.iter().filter(|d| **d >= 0.0).count() as f64
+                    / (step.abs() * period);
+                }
+                println!(
+                  "  pattern angle={} step={} width={} height={} row_estimate={} dashes={:?}",
+                  p.angle,
+                  step,
+                  bounds.width(),
+                  bounds.height(),
+                  bounds.height() / step.abs(),
+                  p.dashes
+                );
+              }
+              println!(
+                "  filled_area={area} estimated_segments={estimate:.0} minimum_segment_bytes={:.0}",
+                estimate * std::mem::size_of::<[Point; 2]>() as f64
+              );
+            }
+          }
+          _ => {}
+        }
+      }
+    }
+  }
+
   #[test]
   fn solid_fill_keeps_a_hole_and_a_separate_island() {
     let square = |x, y, size| {

@@ -3,6 +3,8 @@
 /private/
 /tools/dwg-converter/bin/
 /tools/dwg-converter/obj/
+/tools/*-tests/bin/
+/tools/*-tests/obj/
 /tests/fixtures/problem_areas.dxf
 .env
 .env.*

@@ -7,7 +7,9 @@ use dxf::{
 use eframe::egui::Color32;
 
 use crate::{
-  cad_scene::{Appearance, CadFill, CadText, EntityStyle, Layer, indexed_color},
+  cad_scene::{
+    Appearance, CadFill, CadPatternHatch, CadText, DrawStep, EntityStyle, Layer, indexed_color,
+  },
   dxf_import::{Transform2, append_entity},
   elevation::{ElevationObject, Transform3, ZRange},
   geometry::{Bounds, Point, Primitive},
@@ -32,6 +34,22 @@ pub fn extract(drawing: &Drawing, raw: &RawDxf) -> (Vec<Primitive>, Appearance, 
   for block in drawing.blocks() {
     index_texts(&block.name, block.entities.iter().collect());
   }
+  let mut wipeouts = HashMap::new();
+  let mut index_masks = |name: &str, entities: Vec<&Entity>| {
+    if let Some(records) = raw.wipeouts.get(name) {
+      for (entity, record) in entities
+        .into_iter()
+        .filter(|e| matches!(e.specific, EntityType::Wipeout(_)))
+        .zip(records)
+      {
+        wipeouts.insert(entity as *const Entity as usize, record);
+      }
+    }
+  };
+  index_masks("", drawing.entities().collect());
+  for block in drawing.blocks() {
+    index_masks(&block.name, block.entities.iter().collect());
+  }
   let mut builder = Builder {
     drawing,
     raw,
@@ -40,6 +58,15 @@ pub fn extract(drawing: &Drawing, raw: &RawDxf) -> (Vec<Primitive>, Appearance, 
     unsupported: 0,
     layer_ids: HashMap::new(),
     mtexts,
+    wipeouts,
+    unsupported_types: HashMap::new(),
+    source_kinds: raw
+      .sequence
+      .values()
+      .flatten()
+      .filter(|(_, h)| *h != 0)
+      .map(|(k, h)| (*h, k.as_str()))
+      .collect(),
     elevation_transform: Transform3::IDENTITY,
     block_path: String::new(),
   };
@@ -53,10 +80,18 @@ pub fn extract(drawing: &Drawing, raw: &RawDxf) -> (Vec<Primitive>, Appearance, 
   if raw.binary {
     builder.appearance.warnings.push("Бинарный DXF: дополнительные сущности HATCH/ARC_DIMENSION и часть свойств слоёв не прочитаны. Для полного отображения сохраните ASCII DXF.".to_owned());
   }
-  for entity in drawing.entities() {
-    builder.entity(entity, Transform2::IDENTITY, None, 0, true);
+  builder.contents(
+    "",
+    drawing.entities().collect(),
+    Transform2::IDENTITY,
+    None,
+    0,
+    true,
+  );
+  for (kind, count) in &builder.unsupported_types {
+    let source_count = raw.counts.get(kind).copied().unwrap_or(*count);
+    builder.appearance.warnings.push(format!("Не отображается {kind}: {count} экземпляров; в исходном DXF {source_count} записей, включая определения блоков."));
   }
-  builder.extras("", Transform2::IDENTITY, None, 0, true);
   // Дополняем счётчик типами, которые библиотека DXF вообще не передаёт вызывающему коду.
   for (kind, count) in &raw.counts {
     if !matches!(
@@ -120,8 +155,16 @@ pub fn extract(drawing: &Drawing, raw: &RawDxf) -> (Vec<Primitive>, Appearance, 
   for text in &builder.appearance.texts {
     builder.appearance.layers[text.style.layer].count += 1;
   }
-  for fill in &builder.appearance.fills {
+  for fill in builder
+    .appearance
+    .fills
+    .iter()
+    .chain(&builder.appearance.masks)
+  {
     builder.appearance.layers[fill.style.layer].count += 1;
+  }
+  for hatch in &builder.appearance.pattern_hatches {
+    builder.appearance.layers[hatch.overview.style.layer].count += 1;
   }
   builder.appearance.snap_index = Arc::new(crate::spatial::SpatialIndex::new(
     builder.geometry.len(),
@@ -177,6 +220,9 @@ struct Builder<'a> {
   drawing: &'a Drawing,
   raw: &'a RawDxf,
   mtexts: HashMap<usize, &'a Record>,
+  wipeouts: HashMap<usize, &'a Record>,
+  source_kinds: HashMap<u64, &'a str>,
+  unsupported_types: HashMap<String, usize>,
   geometry: Vec<Primitive>,
   appearance: Appearance,
   unsupported: usize,
@@ -184,6 +230,119 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
+  fn contents(
+    &mut self,
+    name: &str,
+    entities: Vec<&Entity>,
+    transform: Transform2,
+    parent: Option<&EntityStyle>,
+    depth: usize,
+    diagnostic: bool,
+  ) {
+    let extras = self.raw.extras.get(name).map_or(&[][..], Vec::as_slice);
+    let handles: HashMap<_, _> = entities
+      .iter()
+      .enumerate()
+      .filter(|(_, e)| e.common.handle.0 != 0)
+      .map(|(i, e)| (e.common.handle.0, i))
+      .collect();
+    let mut used = vec![false; entities.len()];
+    let mut used_extras = vec![false; extras.len()];
+    let extra_handles: HashMap<_, _> = extras
+      .iter()
+      .enumerate()
+      .filter_map(|(i, r)| {
+        r.text(5)
+          .and_then(|h| u64::from_str_radix(h.trim(), 16).ok())
+          .filter(|h| *h != 0)
+          .map(|h| (h, i))
+      })
+      .collect();
+    let mut extra_cursor = 0;
+    let mut order = Vec::new();
+    let mut cursor = 0;
+    if let Some(sequence) = self.raw.sequence.get(name) {
+      for (kind, handle) in sequence {
+        if matches!(kind.as_str(), "HATCH" | "ARC_DIMENSION") {
+          let index = if *handle != 0 {
+            extra_handles.get(handle).copied()
+          } else {
+            while extra_cursor < used_extras.len() && used_extras[extra_cursor] {
+              extra_cursor += 1;
+            }
+            (extra_cursor < extras.len()).then_some(extra_cursor)
+          };
+          if let Some(index) = index
+            && !used_extras[index]
+          {
+            used_extras[index] = true;
+            order.push((true, index, *handle));
+          }
+        } else {
+          let index = if *handle != 0 {
+            handles.get(handle).copied()
+          } else {
+            while cursor < used.len() && used[cursor] {
+              cursor += 1;
+            }
+            (cursor < used.len()
+              && (entity_kind(&entities[cursor].specific) == kind
+                || (kind == "3DLINE" && matches!(entities[cursor].specific, EntityType::Line(_)))))
+            .then_some(cursor)
+          };
+          if let Some(index) = index
+            && !used[index]
+          {
+            used[index] = true;
+            order.push((false, index, *handle));
+          }
+        }
+      }
+    }
+    order.extend(
+      entities
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !used[*i])
+        .map(|(i, e)| (false, i, e.common.handle.0)),
+    );
+    order.extend(
+      extras
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !used_extras[*i])
+        .map(|(i, r)| {
+          (
+            true,
+            i,
+            r.text(5)
+              .and_then(|s| u64::from_str_radix(s.trim(), 16).ok())
+              .unwrap_or(0),
+          )
+        }),
+    );
+    if order.iter().all(|(_, _, h)| *h != 0)
+      || order
+        .iter()
+        .any(|(_, _, h)| self.raw.draw_order.contains_key(h))
+    {
+      // Нулевой sort handle означает перенос в конец, как в CAD-порядке отрисовки.
+      order.sort_by_key(|(_, _, handle)| {
+        match self.raw.draw_order.get(handle).copied().unwrap_or(*handle) {
+          0 => u64::MAX,
+          value => value,
+        }
+      });
+    }
+    for (extra, index, _) in order {
+      if extra {
+        self.extra(&extras[index], transform, parent, depth, diagnostic);
+      } else {
+        self.entity(entities[index], transform, parent, depth, diagnostic);
+      }
+    }
+  }
+
   fn layer(&mut self, name: &str) -> usize {
     if let Some(index) = self.layer_ids.get(name) {
       return *index;
@@ -324,6 +483,7 @@ impl Builder<'_> {
       self.geometry.len(),
       self.appearance.texts.len(),
       self.appearance.fills.len(),
+      self.appearance.pattern_hatches.len(),
     );
     match &entity.specific {
       EntityType::Insert(insert) => {
@@ -437,7 +597,7 @@ impl Builder<'_> {
           ],
           text.line_spacing_factor as f32,
           &text.text_style_name,
-          false,
+          text.text_style_name.starts_with("DWG_PROXY_BASELINE_"),
           transform,
           style,
         );
@@ -557,6 +717,10 @@ impl Builder<'_> {
               );
             }
           }
+          self
+            .appearance
+            .draw_steps
+            .push(DrawStep::Primitive(self.geometry.len()));
           self.geometry.push(Primitive::Path {
             points,
             closed: false,
@@ -564,6 +728,13 @@ impl Builder<'_> {
           });
           self.appearance.styles.push(style);
         }
+      }
+      EntityType::Wipeout(mask) => {
+        let raw = self
+          .wipeouts
+          .get(&(entity as *const Entity as usize))
+          .copied();
+        self.mask(mask, raw, transform, style);
       }
       EntityType::Solid(solid) => {
         let combined = transform.then(Transform2::ocs(
@@ -593,6 +764,7 @@ impl Builder<'_> {
       }
       _ => {
         let start = self.geometry.len();
+        let before_unsupported = self.unsupported;
         append_entity(
           self.drawing,
           entity,
@@ -605,6 +777,19 @@ impl Builder<'_> {
           .appearance
           .styles
           .extend((start..self.geometry.len()).map(|_| style.clone()));
+        self
+          .appearance
+          .draw_steps
+          .extend((start..self.geometry.len()).map(DrawStep::Primitive));
+        if self.unsupported > before_unsupported {
+          let kind = self
+            .source_kinds
+            .get(&entity.common.handle.0)
+            .copied()
+            .unwrap_or_else(|| entity_kind(&entity.specific));
+          *self.unsupported_types.entry(kind.to_owned()).or_default() +=
+            self.unsupported - before_unsupported;
+        }
       }
     }
     if diagnostic && let Some(kind) = crate::elevation::entity_name(entity) {
@@ -622,7 +807,7 @@ impl Builder<'_> {
     source: String,
     range: Option<ZRange>,
     style: EntityStyle,
-    starts: (usize, usize, usize),
+    starts: (usize, usize, usize, usize),
   ) {
     let mut bounds = Bounds::empty();
     for primitive in &self.geometry[starts.0..] {
@@ -635,6 +820,9 @@ impl Builder<'_> {
     }
     for fill in &self.appearance.fills[starts.2..] {
       bounds.include_bounds(fill.bounds);
+    }
+    for hatch in &self.appearance.pattern_hatches[starts.3..] {
+      bounds.include_bounds(hatch.overview.bounds);
     }
     if bounds.is_valid() {
       self.appearance.elevations.push(ElevationObject {
@@ -660,10 +848,14 @@ impl Builder<'_> {
       return;
     }
     if let Some(block) = self.drawing.blocks().find(|block| block.name == name) {
-      for child in &block.entities {
-        self.entity(child, transform, Some(style), depth, diagnostic);
-      }
-      self.extras(name, transform, Some(style), depth, diagnostic);
+      self.contents(
+        name,
+        block.entities.iter().collect(),
+        transform,
+        Some(style),
+        depth,
+        diagnostic,
+      );
     } else {
       self.warning(&format!("Отсутствует блок {}", name));
     }
@@ -756,6 +948,10 @@ impl Builder<'_> {
       )
     });
     if let Some(bounds) = Bounds::from_points(corners) {
+      self
+        .appearance
+        .draw_steps
+        .push(DrawStep::Text(self.appearance.texts.len()));
       self.appearance.texts.push(CadText {
         text,
         origin,
@@ -774,8 +970,42 @@ impl Builder<'_> {
     }
   }
 
+  fn mask(
+    &mut self,
+    mask: &dxf::entities::Wipeout,
+    raw: Option<&Record>,
+    _transform: Transform2,
+    style: EntityStyle,
+  ) {
+    if mask.display_options_flags & 1 == 0 {
+      return;
+    }
+    let result = decode_mask(mask, raw, self.elevation_transform);
+    match result {
+      Ok((vertices, indices)) => {
+        if let Some(bounds) = Bounds::from_points(vertices.iter().copied()) {
+          self
+            .appearance
+            .draw_steps
+            .push(DrawStep::Mask(self.appearance.masks.len()));
+          self.appearance.masks.push(CadFill {
+            vertices,
+            indices,
+            style,
+            bounds,
+          });
+        }
+      }
+      Err(error) => self.warning(&error),
+    }
+  }
+
   fn fill(&mut self, vertices: Vec<Point>, indices: Vec<u32>, style: EntityStyle) {
     if let Some(bounds) = Bounds::from_points(vertices.iter().copied()) {
+      self
+        .appearance
+        .draw_steps
+        .push(DrawStep::Fill(self.appearance.fills.len()));
       self.appearance.fills.push(CadFill {
         vertices,
         indices,
@@ -785,124 +1015,172 @@ impl Builder<'_> {
     }
   }
 
-  fn extras(
+  fn extra(
     &mut self,
-    block: &str,
+    record: &Record,
     transform: Transform2,
     parent: Option<&EntityStyle>,
     depth: usize,
     diagnostic: bool,
   ) {
-    let Some(records) = self.raw.extras.get(block) else {
-      return;
+    let mut common = EntityCommon {
+      layer: record.text(8).unwrap_or("0").to_owned(),
+      is_visible: record.integer(60, 0) == 0,
+      ..Default::default()
     };
-    for record in records {
-      let mut common = EntityCommon {
-        layer: record.text(8).unwrap_or("0").to_owned(),
-        is_visible: record.integer(60, 0) == 0,
-        ..Default::default()
-      };
-      let index = record.integer(62, 256);
-      common.color = match index {
-        0 => dxf::Color::by_block(),
-        1..=255 => dxf::Color::from_index(index as u8),
-        _ => dxf::Color::by_layer(),
-      };
-      common.color_24_bit = record.integer(420, 0);
-      common.transparency = record.integer(440, 0);
-      let mut style = self.style(&common, parent, false);
-      if record.text(420).is_some() && record.integer(420, 0) == 0 {
-        style.color = Color32::from_rgba_unmultiplied(0, 0, 0, style.color.a());
+    let index = record.integer(62, 256);
+    common.color = match index {
+      0 => dxf::Color::by_block(),
+      1..=255 => dxf::Color::from_index(index as u8),
+      _ => dxf::Color::by_layer(),
+    };
+    common.color_24_bit = record.integer(420, 0);
+    common.transparency = record.integer(440, 0);
+    let mut style = self.style(&common, parent, false);
+    if record.text(420).is_some() && record.integer(420, 0) == 0 {
+      style.color = Color32::from_rgba_unmultiplied(0, 0, 0, style.color.a());
+    }
+    if record.kind == "ARC_DIMENSION" {
+      if let Some(name) = record.text(2) {
+        self.block(name, transform, &style, depth + 1, false);
+      } else {
+        self.warning("Дуговой размер не содержит графического блока");
       }
-      if record.kind == "ARC_DIMENSION" {
-        if let Some(name) = record.text(2) {
-          self.block(name, transform, &style, depth + 1, false);
-        } else {
-          self.warning("Дуговой размер не содержит графического блока");
-        }
-        continue;
-      }
-      let result = crate::hatch::decode(record);
-      match result {
-        Ok(hatch) => {
-          let starts = (
-            self.geometry.len(),
-            self.appearance.texts.len(),
-            self.appearance.fills.len(),
-          );
-          let elevation_style = style.clone();
-          let elevation_transform =
-            self
-              .elevation_transform
-              .then(Transform3::ocs(&dxf::Vector::new(
-                record.number(210, 0.0),
-                record.number(220, 0.0),
-                record.number(230, 1.0),
-              )));
-          let mut elevation = ZRange::values(
-            hatch
-              .loops
-              .iter()
-              .flatten()
-              .map(|p| elevation_transform.z(&dxf::Point::new(p.x, p.y, record.number(30, 0.0)))),
-          );
-          if let Some(range) = &mut elevation {
-            range.approximate = range.max - range.min > 1e-9;
-          }
-          let combined = transform.then(Transform2::ocs(
-            &dxf::Vector::new(
+      return;
+    }
+    let result = crate::hatch::decode(record);
+    match result {
+      Ok(hatch) => {
+        let starts = (
+          self.geometry.len(),
+          self.appearance.texts.len(),
+          self.appearance.fills.len(),
+          self.appearance.pattern_hatches.len(),
+        );
+        let elevation_style = style.clone();
+        let elevation_transform =
+          self
+            .elevation_transform
+            .then(Transform3::ocs(&dxf::Vector::new(
               record.number(210, 0.0),
               record.number(220, 0.0),
               record.number(230, 1.0),
+            )));
+        let mut elevation = ZRange::values(
+          hatch
+            .loops
+            .iter()
+            .flatten()
+            .map(|p| elevation_transform.z(&dxf::Point::new(p.x, p.y, record.number(30, 0.0)))),
+        );
+        if let Some(range) = &mut elevation {
+          range.approximate = range.max - range.min > 1e-9;
+        }
+        let combined = transform.then(Transform2::ocs(
+          &dxf::Vector::new(
+            record.number(210, 0.0),
+            record.number(220, 0.0),
+            record.number(230, 1.0),
+          ),
+          record.number(30, 0.0),
+        ));
+        if hatch.solid {
+          match hatch.triangulate() {
+            Ok((points, indices)) => self.fill(
+              points
+                .into_iter()
+                .map(|point| combined.apply(point))
+                .collect(),
+              indices,
+              style,
             ),
-            record.number(30, 0.0),
-          ));
-          if hatch.solid {
-            match hatch.triangulate() {
-              Ok((points, indices)) => self.fill(
-                points
-                  .into_iter()
-                  .map(|point| combined.apply(point))
-                  .collect(),
-                indices,
-                style,
-              ),
-              Err(error) => self.warning(&error),
-            }
-          } else {
-            match hatch.lines() {
-              Ok(lines) => {
-                for line in lines {
-                  self.geometry.push(if line[0] == line[1] {
-                    Primitive::Point(combined.apply(line[0]))
-                  } else {
-                    Primitive::Path {
-                      points: line.map(|point| combined.apply(point)).to_vec(),
-                      closed: false,
-                      curves: vec![],
-                    }
-                  });
-                  self.appearance.styles.push(style.clone());
-                }
-              }
-              Err(error) => self.warning(&error),
-            }
+            Err(error) => self.warning(&error),
           }
-          if diagnostic {
-            self.record_elevation(
-              format!(
-                "HATCH #{}{}",
-                record.text(5).unwrap_or("?"),
-                self.block_path
-              ),
-              elevation,
-              elevation_style,
-              starts,
-            );
+        } else {
+          match hatch.lines() {
+            Ok(lines) => {
+              for line in lines {
+                self
+                  .appearance
+                  .draw_steps
+                  .push(DrawStep::Primitive(self.geometry.len()));
+                self.geometry.push(if line[0] == line[1] {
+                  Primitive::Point(combined.apply(line[0]))
+                } else {
+                  Primitive::Path {
+                    points: line.map(|point| combined.apply(point)).to_vec(),
+                    closed: false,
+                    curves: vec![],
+                  }
+                });
+                self.appearance.styles.push(style.clone());
+              }
+            }
+            Err(error) if crate::hatch::Hatch::exceeds_eager_limit(&error) => {
+              self.pattern_hatch(&hatch, combined, style);
+            }
+            Err(error) => self.warning(&error),
           }
         }
-        Err(error) => self.warning(&error),
+        if diagnostic {
+          self.record_elevation(
+            format!(
+              "HATCH #{}{}",
+              record.text(5).unwrap_or("?"),
+              self.block_path
+            ),
+            elevation,
+            elevation_style,
+            starts,
+          );
+        }
       }
+      Err(error) => self.warning(&error),
+    }
+  }
+
+  fn pattern_hatch(
+    &mut self,
+    hatch: &crate::hatch::Hatch,
+    transform: Transform2,
+    style: EntityStyle,
+  ) {
+    let result = hatch.prepare_view().and_then(|geometry| {
+      let (points, indices) = hatch.triangulate()?;
+      let vertices: Vec<_> = points.into_iter().map(|p| transform.apply(p)).collect();
+      if indices.is_empty()
+        || vertices
+          .iter()
+          .any(|p| !p.x.is_finite() || !p.y.is_finite())
+      {
+        return Err("Не удалось построить обзорную границу плотной штриховки".to_owned());
+      }
+      let bounds =
+        Bounds::from_points(vertices.iter().copied()).ok_or("Пустая граница плотной штриховки")?;
+      Ok(CadPatternHatch {
+        geometry: Arc::new(geometry),
+        transform,
+        overview: CadFill {
+          vertices,
+          indices,
+          style,
+          bounds,
+        },
+      })
+    });
+    match result {
+      Ok(hatch) => {
+        self
+          .appearance
+          .draw_steps
+          .push(DrawStep::Hatch(self.appearance.pattern_hatches.len()));
+        self.appearance.pattern_hatches.push(hatch);
+        let message = "Плотные штриховки сохранены: в обзорном масштабе отображается их усреднённая плотность с отверстиями; при увеличении — исходные штрихи. Обзорный режим отмечается на холсте.";
+        if !self.appearance.warnings.iter().any(|w| w == message) {
+          self.appearance.warnings.push(message.to_owned());
+        }
+      }
+      Err(error) => self.warning(&error),
     }
   }
 
@@ -919,6 +1197,157 @@ impl Builder<'_> {
   }
 }
 
+// Библиотека не публикует имя типа; сопоставление нужно для DXF без идентификаторов.
+fn entity_kind(entity: &EntityType) -> &'static str {
+  match entity {
+    EntityType::Face3D(_) => "3DFACE",
+    EntityType::Solid3D(_) => "3DSOLID",
+    EntityType::ProxyEntity(_) => "ACAD_PROXY_ENTITY",
+    EntityType::Arc(_) => "ARC",
+    EntityType::ArcAlignedText(_) => "ARCALIGNEDTEXT",
+    EntityType::AttributeDefinition(_) => "ATTDEF",
+    EntityType::Attribute(_) => "ATTRIB",
+    EntityType::Body(_) => "BODY",
+    EntityType::Circle(_) => "CIRCLE",
+    EntityType::RotatedDimension(_) => "DIMENSION",
+    EntityType::RadialDimension(_) => "DIMENSION",
+    EntityType::DiameterDimension(_) => "DIMENSION",
+    EntityType::AngularThreePointDimension(_) => "DIMENSION",
+    EntityType::OrdinateDimension(_) => "DIMENSION",
+    EntityType::Ellipse(_) => "ELLIPSE",
+    EntityType::Helix(_) => "HELIX",
+    EntityType::Image(_) => "IMAGE",
+    EntityType::Insert(_) => "INSERT",
+    EntityType::Leader(_) => "LEADER",
+    EntityType::Light(_) => "LIGHT",
+    EntityType::Line(_) => "LINE",
+    EntityType::LwPolyline(_) => "LWPOLYLINE",
+    EntityType::MLine(_) => "MLINE",
+    EntityType::MText(_) => "MTEXT",
+    EntityType::OleFrame(_) => "OLEFRAME",
+    EntityType::Ole2Frame(_) => "OLE2FRAME",
+    EntityType::ModelPoint(_) => "POINT",
+    EntityType::Polyline(_) => "POLYLINE",
+    EntityType::Ray(_) => "RAY",
+    EntityType::Region(_) => "REGION",
+    EntityType::RText(_) => "RTEXT",
+    EntityType::Section(_) => "SECTION",
+    EntityType::Seqend(_) => "SEQEND",
+    EntityType::Shape(_) => "SHAPE",
+    EntityType::Solid(_) => "SOLID",
+    EntityType::Spline(_) => "SPLINE",
+    EntityType::Text(_) => "TEXT",
+    EntityType::Tolerance(_) => "TOLERANCE",
+    EntityType::Trace(_) => "TRACE",
+    EntityType::DgnUnderlay(_) => "DGNUNDERLAY",
+    EntityType::DwfUnderlay(_) => "DWFUNDERLAY",
+    EntityType::PdfUnderlay(_) => "PDFUNDERLAY",
+    EntityType::Vertex(_) => "VERTEX",
+    EntityType::Wipeout(_) => "WIPEOUT",
+    EntityType::XLine(_) => "XLINE",
+  }
+}
+
+fn decode_mask(
+  mask: &dxf::entities::Wipeout,
+  raw: Option<&Record>,
+  transform: Transform3,
+) -> Result<(Vec<Point>, Vec<u32>), String> {
+  let fail = || "WIPEOUT: некорректная граница маски".to_owned();
+  let width = mask.image_size.x;
+  let height = mask.image_size.y;
+  if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+    return Err(fail());
+  }
+  let full = vec![
+    Point::new(-0.5, -0.5),
+    Point::new(width - 0.5, -0.5),
+    Point::new(width - 0.5, height - 0.5),
+    Point::new(-0.5, height - 0.5),
+  ];
+  let clipping = mask.use_clipping && mask.display_options_flags & 4 != 0;
+  let mut boundary = if clipping {
+    if let Some(raw) = raw {
+      // В dxf 0.6.1 неверный код Y для WIPEOUT; читаем реальные группы 14/24.
+      let mut points = Vec::new();
+      let mut x = None;
+      for (code, value) in &raw.pairs {
+        if *code == 14 {
+          if x.is_some() {
+            return Err(fail());
+          }
+          x = Some(value.trim().parse::<f64>().map_err(|_| fail())?);
+        } else if *code == 24 {
+          let y = value.trim().parse::<f64>().map_err(|_| fail())?;
+          points.push(Point::new(x.take().ok_or_else(fail)?, y));
+        }
+      }
+      if x.is_some() || raw.integer(91, points.len() as i32) != points.len() as i32 {
+        return Err(fail());
+      }
+      points
+    } else {
+      mask
+        .clipping_vertices
+        .iter()
+        .map(|p| Point::new(p.x, p.y))
+        .collect()
+    }
+  } else {
+    full.clone()
+  };
+  if boundary.len() == 2 {
+    let a = boundary[0];
+    let b = boundary[1];
+    boundary = vec![a, Point::new(b.x, a.y), b, Point::new(a.x, b.y)];
+  }
+  if boundary.len() > 2 && boundary.first() == boundary.last() {
+    boundary.pop();
+  }
+  if boundary.len() < 3
+    || boundary
+      .iter()
+      .any(|p| !p.x.is_finite() || !p.y.is_finite())
+  {
+    return Err(fail());
+  }
+  let inverted = clipping && raw.map_or(mask.is_inside_clipping, |r| r.integer(290, 0) != 0);
+  let mut holes = Vec::new();
+  let points = if inverted {
+    let mut points = full;
+    holes.push(points.len());
+    points.extend(boundary);
+    points
+  } else {
+    boundary
+  };
+  let flat: Vec<_> = points.iter().flat_map(|p| [p.x, p.y]).collect();
+  let indices = earcutr::earcut(&flat, &holes, 2).map_err(|_| fail())?;
+  if indices.is_empty() {
+    return Err(fail());
+  }
+  let vertices = points
+    .into_iter()
+    .map(|p| {
+      // Начало координат клип-границы находится сверху слева, V направлен вверх.
+      let u = p.x + 0.5;
+      let v = height - p.y - 0.5;
+      transform.xy(&dxf::Point::new(
+        mask.location.x + mask.u_vector.x * u + mask.v_vector.x * v,
+        mask.location.y + mask.u_vector.y * u + mask.v_vector.y * v,
+        mask.location.z + mask.u_vector.z * u + mask.v_vector.z * v,
+      ))
+    })
+    .collect::<Vec<_>>();
+  if vertices
+    .iter()
+    .any(|p| !p.x.is_finite() || !p.y.is_finite())
+  {
+    return Err(fail());
+  }
+  Ok((vertices, indices.into_iter().map(|i| i as u32).collect()))
+}
+
 fn rgb(value: i32) -> Color32 {
   Color32::from_rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
 }
@@ -926,6 +1355,182 @@ fn rgb(value: i32) -> Color32 {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn dense_hatch_remains_parametric_with_nested_transforms_and_layer_visibility() {
+    let source = concat!(
+      "0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nDense\n70\n0\n10\n10\n20\n20\n30\n0\n",
+      "0\nHATCH\n5\nA1\n8\n0\n70\n0\n91\n2\n",
+      "92\n2\n72\n0\n73\n1\n93\n4\n10\n10\n20\n20\n10\n10010\n20\n20\n10\n10010\n20\n10020\n10\n10\n20\n10020\n97\n0\n",
+      "92\n2\n72\n0\n73\n1\n93\n4\n10\n2010\n20\n2020\n10\n3010\n20\n2020\n10\n3010\n20\n3020\n10\n2010\n20\n3020\n97\n0\n",
+      "75\n0\n78\n1\n53\n0\n43\n0\n44\n0\n45\n0\n46\n1\n79\n2\n49\n1\n49\n-1\n0\nENDBLK\n",
+      "0\nBLOCK\n2\nOuter\n70\n0\n10\n0\n20\n0\n30\n0\n0\nINSERT\n5\nA2\n8\nInner\n2\nDense\n10\n50\n20\n60\n41\n2\n42\n3\n50\n90\n0\nENDBLK\n0\nENDSEC\n",
+      "0\nSECTION\n2\nENTITIES\n0\nINSERT\n5\nA3\n8\nParent\n2\nOuter\n10\n100\n20\n200\n50\n90\n0\nENDSEC\n0\nEOF\n"
+    );
+    let drawing = Drawing::load(&mut std::io::Cursor::new(source.as_bytes())).unwrap();
+    let (primitives, mut appearance, unsupported) = extract(&drawing, &RawDxf::parse(source));
+    assert_eq!(unsupported, 0);
+    assert!(primitives.is_empty() && appearance.fills.is_empty());
+    assert_eq!(appearance.draw_steps, [DrawStep::Hatch(0)]);
+    assert_eq!(appearance.pattern_hatches.len(), 1);
+    let hatch = &appearance.pattern_hatches[0];
+    let p = hatch.transform.apply(Point::new(10.0, 20.0));
+    assert!((p.x - 40.0).abs() < 1e-8 && (p.y - 250.0).abs() < 1e-8);
+    let original = hatch.transform.inverse().unwrap().apply(p);
+    assert!((original.x - 10.0).abs() < 1e-8 && (original.y - 20.0).abs() < 1e-8);
+    assert!((hatch.overview.bounds.min.x + 19960.0).abs() < 1e-8);
+    assert!((hatch.overview.bounds.min.y + 29750.0).abs() < 1e-8);
+    assert_eq!(hatch.geometry.source.loops.len(), 2);
+    let layer = hatch.overview.style.layer;
+    assert_eq!(appearance.layers[layer].name, "Inner");
+    assert_eq!(appearance.layers[layer].count, 1);
+    assert!(appearance.visible(&hatch.overview.style));
+    let parent = appearance
+      .layers
+      .iter()
+      .position(|l| l.name == "Parent")
+      .unwrap();
+    appearance.layers[parent].visible = false;
+    assert!(!appearance.visible(&appearance.pattern_hatches[0].overview.style));
+    assert!(
+      appearance
+        .warnings
+        .iter()
+        .any(|w| w.contains("Плотные штриховки сохранены"))
+    );
+    assert!(
+      !appearance
+        .warnings
+        .iter()
+        .any(|w| w.contains("Слишком много штрихов"))
+    );
+  }
+
+  #[test]
+  fn wipeout_anonymous_unknown_records_do_not_consume_the_next_typed_entity() {
+    let source = concat!(
+      "0\nSECTION\n2\nENTITIES\n0\nUNSUPPORTED\n",
+      "0\nHATCH\n70\n1\n91\n1\n92\n2\n72\n0\n73\n1\n93\n3\n10\n0\n20\n0\n10\n10\n20\n0\n10\n0\n20\n10\n97\n0\n75\n0\n76\n1\n98\n0\n",
+      "0\nWIPEOUT\n13\n1\n23\n1\n70\n1\n280\n0\n",
+      "0\nLINE\n10\n0\n20\n0\n11\n10\n21\n10\n0\nENDSEC\n0\nEOF\n"
+    );
+    let drawing = Drawing::load(&mut std::io::Cursor::new(source.as_bytes())).unwrap();
+    let (_, appearance, missing) = extract(&drawing, &RawDxf::parse(source));
+    assert_eq!(missing, 1);
+    assert_eq!(
+      appearance.draw_steps,
+      [DrawStep::Fill(0), DrawStep::Mask(0), DrawStep::Primitive(0)]
+    );
+  }
+
+  #[test]
+  fn wipeout_default_order_uses_handles_but_anonymous_entities_keep_sequence() {
+    for handles in [false, true] {
+      let a = if handles { "5\n30\n" } else { "" };
+      let b = if handles { "5\n20\n" } else { "" };
+      let c = if handles { "5\n10\n" } else { "" };
+      let source = format!(
+        "0\nSECTION\n2\nENTITIES\n0\nLINE\n{a}10\n30\n20\n0\n11\n35\n21\n0\n0\nWIPEOUT\n{b}13\n1\n23\n1\n70\n1\n280\n0\n0\nLINE\n{c}10\n10\n20\n0\n11\n15\n21\n0\n0\nENDSEC\n0\nEOF\n"
+      );
+      let drawing = Drawing::load(&mut std::io::Cursor::new(source.as_bytes())).unwrap();
+      let (geometry, appearance, missing) = extract(&drawing, &RawDxf::parse(&source));
+      assert_eq!(missing, 0);
+      let Primitive::Path { points, .. } = &geometry[0] else {
+        panic!()
+      };
+      assert_eq!(points[0].x, if handles { 10.0 } else { 30.0 });
+      assert_eq!(
+        appearance.draw_steps,
+        [
+          DrawStep::Primitive(0),
+          DrawStep::Mask(0),
+          DrawStep::Primitive(1)
+        ]
+      );
+    }
+  }
+
+  #[test]
+  fn wipeout_sortentstable_orders_raw_hatch_and_regular_entities_together() {
+    let source = concat!(
+      "0\nSECTION\n2\nENTITIES\n",
+      "0\nHATCH\n5\n10\n70\n1\n91\n1\n92\n2\n72\n0\n73\n1\n93\n4\n10\n0\n20\n0\n10\n10\n20\n0\n10\n10\n20\n10\n10\n0\n20\n10\n97\n0\n75\n0\n76\n1\n98\n0\n",
+      "0\nWIPEOUT\n5\n20\n13\n1\n23\n1\n70\n1\n280\n0\n",
+      "0\nLINE\n5\n30\n10\n0\n20\n0\n11\n10\n21\n10\n",
+      "0\nENDSEC\n0\nSECTION\n2\nOBJECTS\n0\nSORTENTSTABLE\n5\nA0\n100\nAcDbSortentsTable\n330\nAA\n331\n10\n5\n30\n331\n30\n5\n10\n0\nENDSEC\n0\nEOF\n"
+    );
+    let drawing = Drawing::load(&mut std::io::Cursor::new(source.as_bytes())).unwrap();
+    let (geometry, appearance, missing) = extract(&drawing, &RawDxf::parse(source));
+    assert_eq!(missing, 0);
+    assert_eq!(geometry.len(), 1);
+    assert_eq!(
+      appearance.draw_steps,
+      [DrawStep::Primitive(0), DrawStep::Mask(0), DrawStep::Fill(0)]
+    );
+  }
+
+  #[test]
+  fn wipeout_default_rectangle_and_inverted_boundary_preserve_area() {
+    let mask = dxf::entities::Wipeout {
+      image_size: dxf::Vector::new(4.0, 2.0, 0.0),
+      use_clipping: false,
+      display_options_flags: 1,
+      ..Default::default()
+    };
+    let (vertices, indices) = decode_mask(&mask, None, Transform3::IDENTITY).unwrap();
+    assert_eq!(
+      Bounds::from_points(vertices.iter().copied()).unwrap().max,
+      Point::new(4.0, 2.0)
+    );
+    assert_eq!(indices.len(), 6);
+    let mut clipped = mask;
+    clipped.use_clipping = true;
+    clipped.display_options_flags = 7;
+    clipped.is_inside_clipping = true;
+    clipped.clipping_vertices = vec![
+      dxf::Point::new(0.5, 0.0, 0.0),
+      dxf::Point::new(1.5, 0.0, 0.0),
+      dxf::Point::new(0.5, 1.0, 0.0),
+    ];
+    let (vertices, indices) = decode_mask(&clipped, None, Transform3::IDENTITY).unwrap();
+    let area: f64 = indices
+      .as_chunks::<3>()
+      .0
+      .iter()
+      .map(|triangle| {
+        let a = vertices[triangle[0] as usize];
+        let b = vertices[triangle[1] as usize];
+        let c = vertices[triangle[2] as usize];
+        ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)).abs() * 0.5
+      })
+      .sum();
+    assert!((area - 7.5).abs() < 1e-8);
+  }
+
+  #[test]
+  fn wipeout_clipping_is_supported_inside_a_rotated_block() {
+    let source = concat!(
+      "0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nMask\n70\n0\n10\n0\n20\n0\n30\n0\n",
+      "0\nWIPEOUT\n5\nA1\n8\n0\n10\n10\n20\n20\n11\n2\n21\n0\n12\n0\n22\n3\n13\n4\n23\n2\n70\n7\n280\n1\n71\n2\n91\n4\n14\n-0.5\n24\n-0.5\n14\n3.5\n24\n-0.5\n14\n-0.5\n24\n1.5\n14\n-0.5\n24\n-0.5\n",
+      "0\nENDBLK\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nINSERT\n8\nMasks\n2\nMask\n10\n100\n20\n200\n50\n90\n0\nENDSEC\n0\nEOF\n"
+    );
+    let drawing = Drawing::load(&mut std::io::Cursor::new(source.as_bytes())).unwrap();
+    let (_, appearance, missing) = extract(&drawing, &RawDxf::parse(source));
+    assert_eq!(missing, 0, "WIPEOUT должен сохраняться как маска");
+    assert_eq!(appearance.masks.len(), 1);
+    assert_eq!(appearance.draw_steps, [DrawStep::Mask(0)]);
+    let mask = &appearance.masks[0];
+    assert_eq!(mask.indices.len(), 3);
+    assert!((mask.bounds.min.x - 74.0).abs() < 1e-8);
+    assert!((mask.bounds.max.x - 80.0).abs() < 1e-8);
+    assert!((mask.bounds.min.y - 210.0).abs() < 1e-8);
+    assert!((mask.bounds.max.y - 218.0).abs() < 1e-8);
+    assert_eq!(appearance.layers[mask.style.layer].name, "Masks");
+    let layer = mask.style.layer;
+    let mut appearance = appearance;
+    appearance.layers[layer].visible = false;
+    assert!(!appearance.visible(&appearance.masks[0].style));
+  }
 
   #[test]
   fn explicit_dxf_alpha_does_not_hide_opaque_entities() {

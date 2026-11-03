@@ -84,6 +84,13 @@ impl Transform3 {
     self.0[2][0] * p.x + self.0[2][1] * p.y + self.0[2][2] * p.z + self.0[2][3]
   }
 
+  pub fn xy(self, p: &Point3) -> Point {
+    Point::new(
+      self.0[0][0] * p.x + self.0[0][1] * p.y + self.0[0][2] * p.z + self.0[0][3],
+      self.0[1][0] * p.x + self.0[1][1] * p.y + self.0[1][2] * p.z + self.0[1][3],
+    )
+  }
+
   fn vector_z(self, p: &Vector) -> f64 {
     self.0[2][0] * p.x + self.0[2][1] * p.y + self.0[2][2] * p.z
   }

@@ -45,6 +45,13 @@ jobs:
           dotnet-version: '10.0.302'
       - name: Собрать автономный DWG-конвертер
         run: ./scripts/build-dwg-converter.ps1
+      - name: Проверить сохранённую графику и словари DWG
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($project in @('dwg-converter-tests/ProxyTests.csproj', 'dictionary-recovery-tests/DictionaryRecoveryTests.csproj', 'raw-proxy-tests/RawProxyTests.csproj', 'mline-converter-tests/MLineConversionTests.csproj', 'draw-order-tests/DrawOrderTests.csproj', 'modeler-converter-tests/ModelerConversionTests.csproj')) {
+            dotnet run --project "tools/$project" --configuration Release
+            if ($LASTEXITCODE -ne 0) { throw "Ошибка проверок $project" }
+          }
       - name: Запустить тесты
         run: cargo test --locked
       - name: Проверить качество кода

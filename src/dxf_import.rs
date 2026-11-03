@@ -52,6 +52,32 @@ impl Transform2 {
     )
   }
 
+  pub(crate) fn vector(self, point: Point) -> Point {
+    Point::new(
+      self.a * point.x + self.c * point.y,
+      self.b * point.x + self.d * point.y,
+    )
+  }
+
+  pub(crate) fn inverse(self) -> Option<Self> {
+    let determinant = self.a * self.d - self.b * self.c;
+    if determinant == 0.0 || !determinant.is_finite() {
+      return None;
+    }
+    let result = Self {
+      a: self.d / determinant,
+      b: -self.b / determinant,
+      c: -self.c / determinant,
+      d: self.a / determinant,
+      tx: (self.c * self.ty - self.d * self.tx) / determinant,
+      ty: (self.b * self.tx - self.a * self.ty) / determinant,
+    };
+    [result.a, result.b, result.c, result.d, result.tx, result.ty]
+      .iter()
+      .all(|v| v.is_finite())
+      .then_some(result)
+  }
+
   pub(crate) fn then(self, child: Self) -> Self {
     Self {
       a: self.a * child.a + self.c * child.b,
@@ -149,6 +175,12 @@ pub fn load_dxf(path: &Path) -> Result<DrawingItem, ImportError> {
   for fill in &appearance.fills {
     bounds.include_bounds(fill.bounds);
   }
+  for mask in &appearance.masks {
+    bounds.include_bounds(mask.bounds);
+  }
+  for hatch in &appearance.pattern_hatches {
+    bounds.include_bounds(hatch.overview.bounds);
+  }
 
   if !bounds.is_valid() {
     return Err(ImportError::NoGeometry);
@@ -225,10 +257,18 @@ pub(crate) fn append_entity(
       );
     }
     EntityType::Ellipse(ellipse) => {
+      // ELLIPSE хранит ось и нормаль в мировой системе: проецируем их полное векторное произведение.
+      let n = &ellipse.normal;
+      let a = &ellipse.major_axis;
+      let length = n.x.hypot(n.y).hypot(n.z);
+      if !length.is_finite() || length < 1e-12 {
+        *unsupported += 1;
+        return;
+      }
       let major = point(ellipse.major_axis.x, ellipse.major_axis.y);
       let minor = point(
-        -major.y * ellipse.minor_axis_ratio,
-        major.x * ellipse.minor_axis_ratio,
+        (n.y / length * a.z - n.z / length * a.y) * ellipse.minor_axis_ratio,
+        (n.z / length * a.x - n.x / length * a.z) * ellipse.minor_axis_ratio,
       );
       let sweep = positive_sweep(ellipse.start_parameter, ellipse.end_parameter);
       let closed = (sweep - std::f64::consts::TAU).abs() < 0.0001;
@@ -1003,6 +1043,48 @@ mod tests {
   fn ocs_accounts_for_elevation_and_normalizes_normal() {
     let projected = Transform2::ocs(&Vector::new(0.0, 2.0, 0.0), 7.0).apply(Point::new(10.0, 20.0));
     assert_eq!(projected, Point::new(-10.0, 7.0));
+  }
+
+  #[test]
+  fn ellipse_projection_preserves_normal_and_major_axis_z() {
+    for (major, normal, expected) in [
+      (
+        Vector::new(4.0, 0.0, 0.0),
+        Vector::new(0.0, 0.0, -2.0),
+        Point::new(0.0, -2.0),
+      ),
+      (
+        Vector::new(4.0, 0.0, 0.0),
+        Vector::new(0.0, 1.0, 1.0),
+        Point::new(0.0, 2.0_f64.sqrt()),
+      ),
+      (
+        Vector::new(0.0, 0.0, 4.0),
+        Vector::new(0.0, 1.0, 0.0),
+        Point::new(2.0, 0.0),
+      ),
+    ] {
+      let mut drawing = Drawing::new();
+      drawing.add_entity(Entity::new(EntityType::Ellipse(dxf::entities::Ellipse {
+        major_axis: major,
+        normal,
+        minor_axis_ratio: 0.5,
+        start_parameter: 0.0,
+        end_parameter: std::f64::consts::PI,
+        ..Default::default()
+      })));
+      let (primitives, unsupported) = extract_primitives(&drawing);
+      assert_eq!(unsupported, 0);
+      let Primitive::Path { points, .. } = &primitives[0] else {
+        panic!("Ожидалась дуга эллипса");
+      };
+      assert!(
+        points
+          .iter()
+          .any(|p| (p.x - expected.x).hypot(p.y - expected.y) < 1e-6),
+        "Неверная проекция: {points:?}, ожидается {expected:?}"
+      );
+    }
   }
 
   #[test]

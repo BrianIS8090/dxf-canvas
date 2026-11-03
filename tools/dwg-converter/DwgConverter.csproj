@@ -12,7 +12,7 @@
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="ACadSharp" Version="3.7.1" />
+    <PackageReference Include="ACadSharp" Version="3.8.35" />
     <!-- Метаданные CAD-классов используются библиотекой через отражение. -->
     <TrimmerRootAssembly Include="ACadSharp" />
   </ItemGroup>

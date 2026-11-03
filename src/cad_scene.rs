@@ -64,6 +64,22 @@ pub struct CadFill {
   pub bounds: Bounds,
 }
 
+#[derive(Clone, Debug)]
+pub struct CadPatternHatch {
+  pub geometry: Arc<crate::hatch::PatternHatch>,
+  pub transform: crate::dxf_import::Transform2,
+  pub overview: CadFill,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawStep {
+  Primitive(usize),
+  Text(usize),
+  Fill(usize),
+  Mask(usize),
+  Hatch(usize),
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Appearance {
   pub elevations: Vec<crate::elevation::ElevationObject>,
@@ -72,6 +88,9 @@ pub struct Appearance {
   pub primitive_bounds: Vec<Bounds>,
   pub texts: Vec<CadText>,
   pub fills: Vec<CadFill>,
+  pub masks: Vec<CadFill>,
+  pub pattern_hatches: Vec<CadPatternHatch>,
+  pub draw_steps: Vec<DrawStep>,
   pub warnings: Vec<String>,
   pub source_counts: std::collections::BTreeMap<String, usize>,
   pub snap_index: Arc<crate::spatial::SpatialIndex>,

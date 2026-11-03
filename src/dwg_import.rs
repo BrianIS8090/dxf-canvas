@@ -127,8 +127,28 @@ fn bounded_text(path: &Path, limit: u64) -> Result<String, String> {
 fn conversion_warnings(report: &str) -> Result<Vec<String>, String> {
   let report: serde_json::Value = serde_json::from_str(report)
     .map_err(|error| format!("Некорректный отчёт DWG-конвертера: {error}"))?;
-  if report["engine"] != "ACadSharp 3.7.1" {
+  if report["engine"] != "ACadSharp 3.8.35" {
     return Err("Неожиданная версия встроенного DWG-конвертера".into());
+  }
+  let coverage = &report["proxy_conversion"];
+  let source = coverage["source_count"]
+    .as_u64()
+    .ok_or("Нет числа исходных объектов DWG")?;
+  let replaced = coverage["replaced_count"]
+    .as_u64()
+    .ok_or("Нет числа графических замен DWG")?;
+  let generated = coverage["generated_count"]
+    .as_u64()
+    .ok_or("Нет числа элементов сохранённой графики")?;
+  if coverage["verified"] != true
+    || coverage["duplicate_representations"].as_u64() != Some(0)
+    || replaced > source
+    || (replaced == 0 && generated != 0)
+  {
+    return Err(
+      "Проверка состава DWG не пройдена: обнаружен пропуск или повторное представление объекта."
+        .into(),
+    );
   }
   let count = report["warning_count"]
     .as_u64()
@@ -137,6 +157,9 @@ fn conversion_warnings(report: &str) -> Result<Vec<String>, String> {
     .as_array()
     .ok_or("В отчёте конвертера нет предупреждений")?;
   let mut warnings = Vec::new();
+  if replaced > 0 {
+    warnings.push(format!("Преобразование сложных объектов DWG: {replaced} объектов представлены {generated} элементами. Состав замен проверен после записи DXF; исходные DWG не изменены."));
+  }
   if count > 0 {
     warnings.push(format!("DWG преобразован с предупреждениями: {count}. Проверьте результат по исходному чертежу; подробности конвертера ниже."));
     warnings.extend(
@@ -213,6 +236,116 @@ mod tests {
   use super::*;
 
   #[test]
+  #[ignore = "Нужен DWG_ACCEPTANCE_FILES с JSON-массивом путей; частные чертежи не публикуются"]
+  fn acceptance_dwg_files_open_without_skipping_proxy_objects() {
+    let files: Vec<String> = serde_json::from_str(
+      &std::env::var("DWG_ACCEPTANCE_FILES").expect("Не задан DWG_ACCEPTANCE_FILES"),
+    )
+    .unwrap();
+    assert_eq!(files.len(), 5);
+    let mut failures = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+      let path = Path::new(file);
+      let before = fs::read(path).unwrap();
+      match load_drawing(path, |_| {}) {
+        Ok(item) => {
+          println!(
+            "Файл {}: геометрия {}, тексты {}, заливки {}, маски {}, параметрические штриховки {}, слои {}, неподдерживаемые {}",
+            index + 1,
+            item.primitives.len(),
+            item.appearance.texts.len(),
+            item.appearance.fills.len(),
+            item.appearance.masks.len(),
+            item.appearance.pattern_hatches.len(),
+            item.appearance.layers.len(),
+            item.unsupported_entities
+          );
+          assert!(!item.primitives.is_empty());
+          assert!(item.bounds.is_valid());
+          let context = eframe::egui::Context::default();
+          let mut fonts = eframe::egui::FontDefinitions::default();
+          crate::cad_text::fonts::install(&mut fonts);
+          context.set_fonts(fonts);
+          let rect = eframe::egui::Rect::from_min_size(
+            eframe::egui::Pos2::ZERO,
+            eframe::egui::vec2(1280.0, 820.0),
+          );
+          let scale = (1180.0 / item.bounds.width()).min(720.0 / item.bounds.height()) as f32;
+          let center = item.bounds.center();
+          let view = crate::geometry::ViewTransform {
+            scale,
+            origin: eframe::egui::pos2(
+              640.0 - center.x as f32 * scale,
+              410.0 + center.y as f32 * scale,
+            ),
+          };
+          let mut output = context.run_ui(
+            eframe::egui::RawInput {
+              screen_rect: Some(rect),
+              ..Default::default()
+            },
+            |ui| {
+              crate::cad_render::paint(ui.painter(), &item, view);
+            },
+          );
+          output.textures_delta.clear();
+          let meshes = context.tessellate(output.shapes, output.pixels_per_point);
+          assert!(!meshes.is_empty(), "Пустой кадр файла {}", index + 1);
+          for (mesh_index, mesh) in meshes.into_iter().enumerate() {
+            if let eframe::egui::epaint::Primitive::Mesh(mesh) = mesh.primitive {
+              let invalid = mesh
+                .vertices
+                .iter()
+                .filter(|v| !v.pos.x.is_finite() || !v.pos.y.is_finite())
+                .count();
+              if invalid > 0 {
+                failures.push(format!(
+                  "Файл {}: сетка {mesh_index}, некорректных вершин {invalid}/{}; границы {:?}",
+                  index + 1,
+                  mesh.vertices.len(),
+                  item.bounds
+                ));
+              }
+            }
+          }
+          for warning in &item.appearance.warnings {
+            if !warning.starts_with("Warning:") && !warning.starts_with("NotImplemented:") {
+              println!("Файл {}: {}", index + 1, warning);
+            }
+            if (warning.contains("Неподдерживаемый тип") || warning.contains("Не отображается"))
+              && [
+                "MULTILEADER",
+                "ACAD_TABLE",
+                "AEC_",
+                "WIPEOUT",
+                "MLINE",
+                "REGION",
+              ]
+              .iter()
+              .any(|kind| warning.contains(kind))
+            {
+              failures.push(format!("Файл {}: {warning}", index + 1));
+            }
+            if warning.contains("Не удалось восстановить все границы штриховки")
+              || warning.contains("Слишком много штрихов в одной штриховке")
+            {
+              failures.push(format!("Файл {}: потеря штриховки: {warning}", index + 1));
+            }
+          }
+        }
+        Err(error) => failures.push(format!("Файл {}: {error}", index + 1)),
+      }
+      assert_eq!(
+        before,
+        fs::read(path).unwrap(),
+        "Изменён исходник {}",
+        index + 1
+      );
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+  }
+
+  #[test]
   fn versions_and_extensions_are_checked_before_conversion() {
     assert!(is_dwg(Path::new("русское имя.DWG")));
     assert!(!is_dwg(Path::new("a.dxf")));
@@ -227,17 +360,34 @@ mod tests {
   #[test]
   fn conversion_warnings_are_not_silently_discarded() {
     assert!(
-      conversion_warnings(r#"{"engine":"ACadSharp 3.7.1","warning_count":0,"warnings":[]}"#)
+      conversion_warnings(r#"{"engine":"ACadSharp 3.8.35","warning_count":0,"warnings":[],"proxy_conversion":{"source_count":1,"replaced_count":0,"generated_count":0,"verified":true,"duplicate_representations":0}}"#)
         .unwrap()
         .is_empty()
     );
     let warnings = conversion_warnings(
-      r#"{"engine":"ACadSharp 3.7.1","warning_count":2,"warnings":["Unknown object"]}"#,
+      r#"{"engine":"ACadSharp 3.8.35","warning_count":2,"warnings":["Unknown object"],"proxy_conversion":{"source_count":1,"replaced_count":0,"generated_count":0,"verified":true,"duplicate_representations":0}}"#,
     )
     .unwrap();
     assert_eq!(warnings.len(), 3);
     assert!(warnings[1].contains("Unknown object"));
     assert!(conversion_warnings("not json").is_err());
+  }
+
+  #[test]
+  fn incomplete_or_duplicated_proxy_coverage_is_rejected() {
+    for coverage in [
+      r#"{"source_count":5,"replaced_count":2,"generated_count":4,"verified":false,"duplicate_representations":0}"#,
+      r#"{"source_count":5,"replaced_count":2,"generated_count":4,"verified":true,"duplicate_representations":1}"#,
+      r#"{"source_count":5,"replaced_count":6,"generated_count":4,"verified":true,"duplicate_representations":0}"#,
+    ] {
+      let report = format!(
+        r#"{{"engine":"ACadSharp 3.8.35","warning_count":0,"warnings":[],"proxy_conversion":{coverage}}}"#
+      );
+      assert!(
+        conversion_warnings(&report).is_err(),
+        "Принят неполный отчёт {coverage}"
+      );
+    }
   }
 
   #[test]

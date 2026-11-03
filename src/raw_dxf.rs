@@ -98,6 +98,9 @@ pub struct RawDxf {
   pub entity_overrides: HashMap<u64, Record>,
   pub mtexts: HashMap<String, Vec<Record>>,
   pub counts: BTreeMap<String, usize>,
+  pub sequence: HashMap<String, Vec<(String, u64)>>,
+  pub wipeouts: HashMap<String, Vec<Record>>,
+  pub draw_order: HashMap<u64, u64>,
   pub binary: bool,
 }
 
@@ -132,7 +135,7 @@ impl RawDxf {
         // Не удерживаем координаты десятков тысяч обычных линий второй раз.
         let retain_all = matches!(
           record.kind.as_str(),
-          "HATCH" | "ARC_DIMENSION" | "LAYER" | "SECTION" | "BLOCK"
+          "HATCH" | "ARC_DIMENSION" | "LAYER" | "SECTION" | "BLOCK" | "WIPEOUT" | "SORTENTSTABLE"
         );
         if retain_all
           || matches!(code, 5 | 62 | 70 | 420 | 440)
@@ -167,6 +170,19 @@ impl RawDxf {
       }
       _ => {}
     }
+    if section == "OBJECTS" && record.kind == "SORTENTSTABLE" {
+      let mut entity = None;
+      for (code, value) in &record.pairs {
+        let handle = u64::from_str_radix(value.trim(), 16).ok();
+        if *code == 331 {
+          entity = handle;
+        } else if *code == 5
+          && let (Some(entity), Some(sort)) = (entity.take(), handle)
+        {
+          self.draw_order.insert(entity, sort);
+        }
+      }
+    }
     if section == "TABLES" && record.kind == "LAYER" {
       self
         .layers
@@ -177,6 +193,22 @@ impl RawDxf {
         return;
       }
       *self.counts.entry(record.kind.clone()).or_default() += 1;
+      let handle = record
+        .text(5)
+        .and_then(|v| u64::from_str_radix(v.trim(), 16).ok())
+        .unwrap_or(0);
+      self
+        .sequence
+        .entry(block.clone())
+        .or_default()
+        .push((record.kind.clone(), handle));
+      if record.kind == "WIPEOUT" {
+        self
+          .wipeouts
+          .entry(block.clone())
+          .or_default()
+          .push(record.clone());
+      }
       if record.kind == "MTEXT" {
         self
           .mtexts
