@@ -107,6 +107,38 @@ DictionaryRecovery.Read(normal, FatalNotification, (_, _) => callbackCount++);
 Assert(callbackCount == 2, "Обработчик исходной графики не вызван для исправного DWG.");
 Console.WriteLine("PASS: обычный DWG читается, обработчик до закрытия читателя вызван.");
 
+foreach (var aliasFirst in new[] { true, false })
+{
+  var drawing = new CadDocument(ACadVersion.AC1032);
+  var block = (ACadSharp.Tables.BlockRecord)drawing.Entities.Owner;
+  var line = new Line(XYZ.Zero, XYZ.AxisX);
+  block.Entities.Add(line);
+  var dictionary = block.CreateExtendedDictionary();
+  var constructor = typeof(SortEntitiesTable).GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, null, [block.GetType()], null)!;
+  var canonical = (SortEntitiesTable)constructor.Invoke([block]);
+  var referenceEdit = (SortEntitiesTable)constructor.Invoke([block]);
+  canonical.Add(line, 123);
+  foreach (var key in aliasFirst ? new[] { "ACAD_REFEDIT", "ACAD_SORTENTS" } : new[] { "ACAD_SORTENTS", "ACAD_REFEDIT" })
+    dictionary.Add(key, key == "ACAD_REFEDIT" ? referenceEdit : canonical);
+  var sortPath = Path.Combine(directory, $"sort-dictionary-{aliasFirst}.dwg");
+  using (var output = File.Create(sortPath)) DwgWriter.Write(output, drawing);
+  var sortDrawing = DictionaryRecovery.Read(sortPath, FatalNotification);
+  void VerifyTables(CadDocument result)
+  {
+    var resultBlock = result.GetCadObject<ACadSharp.Tables.BlockRecord>(block.Handle)!;
+    var actual = resultBlock.SortEntitiesTable;
+    var alias = resultBlock.XDictionary.GetEntry<SortEntitiesTable>("ACAD_REFEDIT");
+    Assert(actual.Handle == canonical.Handle && actual.Single().SortHandle == 123, "Потерян рабочий порядок отрисовки.");
+    Assert(alias.Handle == referenceEdit.Handle && !alias.Any() && alias.BlockOwner == resultBlock, "Потерян отдельный ключ ACAD_REFEDIT.");
+    Assert(resultBlock.Entities.Single().Handle == line.Handle, "Изменилась исходная линия.");
+  }
+  VerifyTables(sortDrawing);
+  var sortDxf = Path.ChangeExtension(sortPath, ".dxf");
+  using (var output = File.Create(sortDxf)) DxfWriter.Write(output, sortDrawing, false);
+  VerifyTables(DictionaryRecovery.ReadDxf(sortDxf, FatalNotification));
+}
+Console.WriteLine("PASS: два ключа порядка отрисовки и исходные идентификаторы проходят DWG и DXF.");
+
 var colorDocument = new CadDocument(ACadVersion.AC1032);
 var colorDictionary = colorDocument.RootDictionary.GetEntry<CadDictionary>(CadDictionary.AcadColor);
 var expectedColors = new[] {

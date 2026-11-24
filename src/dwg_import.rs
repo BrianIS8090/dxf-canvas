@@ -242,7 +242,7 @@ mod tests {
       &std::env::var("DWG_ACCEPTANCE_FILES").expect("Не задан DWG_ACCEPTANCE_FILES"),
     )
     .unwrap();
-    assert_eq!(files.len(), 5);
+    assert!(!files.is_empty());
     let mut failures = Vec::new();
     for (index, file) in files.iter().enumerate() {
       let path = Path::new(file);

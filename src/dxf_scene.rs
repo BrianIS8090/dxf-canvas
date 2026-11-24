@@ -16,6 +16,8 @@ use crate::{
   raw_dxf::{RawDxf, Record},
 };
 
+const DRAWING_HATCH_SEGMENT_LIMIT: usize = 200_000;
+
 pub fn extract(drawing: &Drawing, raw: &RawDxf) -> (Vec<Primitive>, Appearance, usize) {
   // Сопоставляем также MTEXT без handle; повторные вставки блока используют одну запись.
   let mut mtexts = HashMap::new();
@@ -69,6 +71,7 @@ pub fn extract(drawing: &Drawing, raw: &RawDxf) -> (Vec<Primitive>, Appearance, 
       .collect(),
     elevation_transform: Transform3::IDENTITY,
     block_path: String::new(),
+    remaining_hatch_segments: DRAWING_HATCH_SEGMENT_LIMIT,
   };
   for layer in drawing.layers() {
     builder.layer(&layer.name);
@@ -215,6 +218,7 @@ pub fn extract(drawing: &Drawing, raw: &RawDxf) -> (Vec<Primitive>, Appearance, 
 }
 
 struct Builder<'a> {
+  remaining_hatch_segments: usize,
   elevation_transform: Transform3,
   block_path: String,
   drawing: &'a Drawing,
@@ -1097,8 +1101,9 @@ impl Builder<'_> {
             Err(error) => self.warning(&error),
           }
         } else {
-          match hatch.lines() {
+          match hatch.lines_with_limit(self.remaining_hatch_segments) {
             Ok(lines) => {
+              self.remaining_hatch_segments -= lines.len();
               for line in lines {
                 self
                   .appearance
@@ -1355,6 +1360,25 @@ fn rgb(value: i32) -> Color32 {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn many_individually_small_hatches_share_the_drawing_budget() {
+    let mut source = "0\nSECTION\n2\nENTITIES\n".to_owned();
+    for (handle, x) in [("A1", 0), ("A2", 20), ("A3", 40)] {
+      source.push_str(&format!(
+        "0\nHATCH\n5\n{handle}\n8\n0\n70\n0\n91\n1\n92\n2\n72\n0\n73\n1\n93\n4\n10\n{x}\n20\n0\n10\n{}\n20\n0\n10\n{}\n20\n80000\n10\n{x}\n20\n80000\n97\n0\n75\n0\n78\n1\n53\n0\n43\n0\n44\n0\n45\n0\n46\n1\n79\n0\n",
+        x + 10, x + 10
+      ));
+    }
+    source.push_str("0\nENDSEC\n0\nEOF\n");
+    let drawing = Drawing::load(&mut std::io::Cursor::new(source.as_bytes())).unwrap();
+    let (primitives, appearance, unsupported) = extract(&drawing, &RawDxf::parse(&source));
+    assert_eq!(unsupported, 0);
+    assert_eq!(primitives.len(), 160_000);
+    assert_eq!(appearance.pattern_hatches.len(), 1);
+    assert_eq!(appearance.draw_steps.last(), Some(&DrawStep::Hatch(0)));
+    assert_eq!(appearance.pattern_hatches[0].overview.bounds.min.x, 40.0);
+  }
 
   #[test]
   fn dense_hatch_remains_parametric_with_nested_transforms_and_layer_visibility() {

@@ -7,8 +7,9 @@ using ACadSharp;
 using ACadSharp.Entities;
 using ACadSharp.IO;
 using ACadSharp.Objects;
+using ACadSharp.Tables;
 
-// Обход только подтверждённого дефекта ключей MLINESTYLE в ACadSharp 3.8.35.
+// Обход подтверждённых конфликтов исходных ключей в ACadSharp 3.8.35.
 internal static class DictionaryRecovery
 {
   private const BindingFlags Fields = BindingFlags.Instance | BindingFlags.NonPublic;
@@ -83,11 +84,17 @@ internal static class DictionaryRecovery
   private static CadDocument Read(string source, NotificationEventHandler notify, bool dxf, Action<DwgReader, CadDocument>? afterRead = null)
   {
     var repairs = new List<Repair>();
+    var sortTables = new List<SortRepair>();
     object? reader = null;
     void OnNotification(object sender, NotificationEventArgs message)
     {
       if (message.NotificationType == NotificationType.Error)
       {
+        if (reader != null && TryRestoreSortKeys(reader, message, out var sortRepair))
+        {
+          sortTables.Add(sortRepair);
+          return;
+        }
         if (reader != null && TryCapture(reader, message, out var repair)
           && repairs.All(r => r.Dictionary.Handle != repair.Dictionary.Handle))
         {
@@ -115,6 +122,17 @@ internal static class DictionaryRecovery
       } }))
     {
       var document = reader is DxfReader dxfReader ? dxfReader.Read() : ((DwgReader)reader).Read();
+      foreach (var repair in sortTables)
+      {
+        var block = document.GetCadObject<BlockRecord>(repair.BlockHandle);
+        if (block == null || block.XDictionary != repair.Dictionary || block.SortEntitiesTable != repair.Canonical
+          || repair.Dictionary["ACAD_REFEDIT"] != repair.Alias || repair.Canonical.BlockOwner != block
+          || repair.Alias.BlockOwner != block || repair.Alias.Any()
+          || document.GetCadObject(repair.CanonicalHandle) != repair.Canonical
+          || document.GetCadObject(repair.AliasHandle) != repair.Alias)
+          throw new IOException("Не удалось сохранить исходные ключи и ссылки таблиц порядка отрисовки.");
+        notify(reader, new NotificationEventArgs($"Восстановлены ключи ACAD_SORTENTS и ACAD_REFEDIT блока {repair.BlockHandle:X}.", NotificationType.Warning));
+      }
       if (repairs.Count == 0)
       {
         if (reader is DwgReader dwgReader)
@@ -141,6 +159,62 @@ internal static class DictionaryRecovery
 
   private sealed record Entry(string Key, ulong Handle, MLineStyle Value);
   private sealed record Repair(CadDictionary Dictionary, Entry[] Entries);
+  private sealed record SortRepair(CadDictionary Dictionary, ulong BlockHandle, SortEntitiesTable Canonical,
+    ulong CanonicalHandle, SortEntitiesTable Alias, ulong AliasHandle);
+
+  private static bool TryRestoreSortKeys(object reader, NotificationEventArgs message, out SortRepair repair)
+  {
+    const string aliasKey = "ACAD_REFEDIT";
+    const string canonicalKey = SortEntitiesTable.DictionaryEntryName;
+    repair = null!;
+    if (message.Exception is not ArgumentException { ParamName: null, InnerException: null }
+      || !message.Message.StartsWith(Prefix + canonicalKey + " to ", StringComparison.Ordinal)) return false;
+    var separator = message.Message.LastIndexOf('|');
+    if (separator < 0 || !ulong.TryParse(message.Message.AsSpan(separator + 1), NumberStyles.None, CultureInfo.InvariantCulture, out var handle)) return false;
+    var builder = GetBuilder(reader);
+    var dictionaries = (IDictionary)GetBuilderField(builder, "dictionaryTemplates");
+    var objects = (Dictionary<ulong, CadObject>)GetBuilderField(builder, "cadObjects");
+    if (dictionaries[handle] is not { } template || objects.GetValueOrDefault(handle) is not CadDictionary dictionary) return false;
+    var original = GetOriginalEntries(template);
+    if (!original.TryGetValue(canonicalKey, out var canonicalHandle) || canonicalHandle is not ulong canonicalId
+      || !original.TryGetValue(aliasKey, out var aliasHandle) || aliasHandle is not ulong aliasId || canonicalId == aliasId
+      || objects.GetValueOrDefault(canonicalId) is not SortEntitiesTable canonical
+      || objects.GetValueOrDefault(aliasId) is not SortEntitiesTable alias
+      || original.Count(p => p.Value == canonicalId || p.Value == aliasId) != 2) return false;
+    var templates = (IDictionary)GetBuilderField(builder, "templatesMap");
+    if (!TryGetSortTemplate(templates[canonicalId], out var block, out _)
+      || !TryGetSortTemplate(templates[aliasId], out var aliasBlock, out var aliasRows)
+      || block != aliasBlock || aliasRows != 0 || objects.GetValueOrDefault(block) is not BlockRecord) return false;
+    var entries = GetDictionaryEntries(dictionary);
+    if (entries.ContainsKey(aliasKey) || !entries.TryGetValue(canonicalKey, out var existing)) return false;
+    // Библиотека подставляет имя объекта вместо ключа записи. Переносим пустую служебную таблицу под её ключ без отсоединения.
+    if (ReferenceEquals(existing, alias) && ReferenceEquals(alias.Owner, dictionary) && canonical.Owner == null)
+    {
+      entries.Remove(canonicalKey);
+      entries.Add(aliasKey, alias);
+      dictionary.Add(canonicalKey, canonical);
+    }
+    else if (ReferenceEquals(existing, canonical) && ReferenceEquals(canonical.Owner, dictionary) && alias.Owner == null)
+      dictionary.Add(aliasKey, alias);
+    else return false;
+    repair = new SortRepair(dictionary, block, canonical, canonicalId, alias, aliasId);
+    return true;
+  }
+
+  [DynamicDependency("BlockOwnerHandle", "ACadSharp.IO.Templates.CadSortensTableTemplate", "ACadSharp")]
+  [DynamicDependency("Values", "ACadSharp.IO.Templates.CadSortensTableTemplate", "ACadSharp")]
+  [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = "Свойства шаблона сохранены явно, версия библиотеки проверяется.")]
+  private static bool TryGetSortTemplate(object? template, out ulong block, out int rows)
+  {
+    block = 0;
+    rows = 0;
+    if (template?.GetType().FullName != "ACadSharp.IO.Templates.CadSortensTableTemplate"
+      || template.GetType().GetProperty("BlockOwnerHandle")?.GetValue(template) is not ulong owner
+      || template.GetType().GetProperty("Values")?.GetValue(template) is not ICollection values) return false;
+    block = owner;
+    rows = values.Count;
+    return block != 0;
+  }
 
   private static bool TryCapture(object reader, NotificationEventArgs message, out Repair repair)
   {

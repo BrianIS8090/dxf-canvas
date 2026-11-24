@@ -587,7 +587,12 @@ impl Hatch {
     Ok((vertices, indices))
   }
 
+  #[cfg(test)]
   pub fn lines(&self) -> Result<Vec<[Point; 2]>, String> {
+    self.lines_with_limit(200_000)
+  }
+
+  pub fn lines_with_limit(&self, limit: usize) -> Result<Vec<[Point; 2]>, String> {
     if self.loops.is_empty() {
       return Ok(Vec::new());
     }
@@ -666,10 +671,10 @@ impl Hatch {
             )
           };
           if pattern.dashes.is_empty() {
-            result.push([unproject(pair[0]), unproject(pair[1])]);
-            if result.len() > 200_000 {
+            if result.len() == limit {
               return Err("Слишком много штрихов в одной штриховке".to_owned());
             }
+            result.push([unproject(pair[0]), unproject(pair[1])]);
           } else {
             let period: f64 = pattern.dashes.iter().map(|value| value.abs()).sum();
             if period < 1.0e-9 {
@@ -689,12 +694,12 @@ impl Hatch {
                   return Err("Слишком много штрихов в одной штриховке".to_owned());
                 }
                 if *dash >= 0.0 && next >= pair[0] && x <= pair[1] {
+                  if result.len() == limit {
+                    return Err("Слишком много штрихов в одной штриховке".to_owned());
+                  }
                   result.push([unproject(x.max(pair[0])), unproject(next.min(pair[1]))]);
                 }
                 x = next;
-              }
-              if result.len() > 200_000 {
-                return Err("Слишком много штрихов в одной штриховке".to_owned());
               }
             }
           }
